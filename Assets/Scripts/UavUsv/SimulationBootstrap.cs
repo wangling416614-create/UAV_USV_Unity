@@ -97,6 +97,16 @@ namespace UavUsv
                     webSocketReceiver.targetVessel = targetVessel;
                     webSocketReceiver.droneHeightOffset = .28f;
                     webSocketReceiver.serverUrl = webSocketUrl;
+
+                    BoatPathPlanningController pathPlanning =
+                        gameObject.AddComponent<BoatPathPlanningController>();
+                    pathPlanning.boat = boat;
+                    pathPlanning.lighthouse = lighthouse;
+                    pathPlanning.buoyWest = buoyWest;
+                    pathPlanning.buoySouth = buoySouth;
+                    pathPlanning.buoyEast = buoyEast;
+                    pathPlanning.targetVessel = targetVessel;
+                    pathPlanning.webSocket = webSocketReceiver;
                 }
                 else
                 {
@@ -493,7 +503,7 @@ namespace UavUsv
                 : "Mission phase: " + (mission ? mission.Status : "Initializing");
 
             string controls = syncStatus != null
-                ? "Motion driven by ROS/Gazebo pose data\n"
+                ? "ROS/Gazebo authoritative motion\n"
                 : "SPACE: launch mission    R: reset\n";
 
             string bridgeText = syncStatus != null

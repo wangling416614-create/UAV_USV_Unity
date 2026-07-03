@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -8,8 +10,8 @@ using UnityEngine;
 namespace UavUsv
 {
     /// <summary>
-    /// Receives authoritative Gazebo ENU poses from a ROS-side WebSocket bridge.
-    /// Unity remains a visualizer in this mode; Gazebo/ROS owns the motion state.
+    /// Exchanges authoritative Gazebo poses and Unity planning commands with ROS.
+    /// Gazebo remains the owner of motion state.
     /// </summary>
     public sealed class ExternalPoseWebSocketClient : MonoBehaviour
     {
@@ -32,6 +34,39 @@ namespace UavUsv
             public PoseData buoy_south;
             public PoseData buoy_east;
             public PoseData target_vessel;
+            public ControlData control;
+        }
+
+        [Serializable]
+        private sealed class ControlData
+        {
+            public string state;
+            public string message;
+            public long path_id;
+            public int waypoint_index;
+            public int waypoint_count;
+        }
+
+        [Serializable]
+        private sealed class PathPoint
+        {
+            public float x;
+            public float y;
+        }
+
+        [Serializable]
+        private sealed class BoatPathCommand
+        {
+            public string type = "boat_path";
+            public long path_id;
+            public PathPoint[] points;
+        }
+
+        [Serializable]
+        private sealed class BoatStopCommand
+        {
+            public string type = "boat_stop";
+            public long command_id;
         }
 
         public Transform boat;
@@ -48,9 +83,12 @@ namespace UavUsv
         public float reconnectDelay = 1.0f;
 
         public string connectionStatus { get; private set; } = "Waiting for ROS WebSocket";
+        public string controlStatus { get; private set; } = "Controller idle";
+        public bool isConnected { get; private set; }
 
         private CancellationTokenSource cancellation;
         private Task receiveTask;
+        private readonly ConcurrentQueue<string> outgoing = new ConcurrentQueue<string>();
         private volatile string pendingJson;
         private Vector3 boatTarget;
         private Vector3 droneTarget;
@@ -72,11 +110,15 @@ namespace UavUsv
             while (!token.IsCancellationRequested)
             {
                 using var socket = new ClientWebSocket();
+                using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+                Task sendTask = null;
                 try
                 {
                     connectionStatus = "Connecting " + serverUrl;
                     await socket.ConnectAsync(new Uri(serverUrl), token);
                     connectionStatus = "Connected " + serverUrl;
+                    isConnected = true;
+                    sendTask = SendLoop(socket, connectionCancellation.Token);
 
                     var buffer = new byte[16384];
                     var builder = new StringBuilder();
@@ -110,6 +152,15 @@ namespace UavUsv
                 {
                     connectionStatus = "WebSocket failed: " + ex.Message;
                 }
+                finally
+                {
+                    isConnected = false;
+                    connectionCancellation.Cancel();
+                    if (sendTask != null)
+                    {
+                        try { await sendTask; } catch (OperationCanceledException) { }
+                    }
+                }
 
                 try
                 {
@@ -120,6 +171,52 @@ namespace UavUsv
                     break;
                 }
             }
+        }
+
+        private async Task SendLoop(ClientWebSocket socket, CancellationToken token)
+        {
+            while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
+            {
+                if (!outgoing.TryDequeue(out string json))
+                {
+                    await Task.Delay(20, token);
+                    continue;
+                }
+
+                byte[] data = Encoding.UTF8.GetBytes(json);
+                await socket.SendAsync(
+                    new ArraySegment<byte>(data),
+                    WebSocketMessageType.Text,
+                    true,
+                    token
+                );
+            }
+        }
+
+        public long SendBoatPath(IReadOnlyList<Vector2> path)
+        {
+            if (path == null || path.Count < 2)
+                return 0;
+
+            long pathId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var points = new PathPoint[path.Count];
+            for (int i = 0; i < path.Count; i++)
+                points[i] = new PathPoint { x = path[i].x, y = path[i].y };
+
+            outgoing.Enqueue(JsonUtility.ToJson(new BoatPathCommand
+            {
+                path_id = pathId,
+                points = points
+            }));
+            return pathId;
+        }
+
+        public void SendBoatStop()
+        {
+            outgoing.Enqueue(JsonUtility.ToJson(new BoatStopCommand
+            {
+                command_id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            }));
         }
 
         private void Update()
@@ -168,6 +265,17 @@ namespace UavUsv
                 ApplyOptionalPose(frame.buoy_south, buoySouth);
                 ApplyOptionalPose(frame.buoy_east, buoyEast);
                 ApplyOptionalPose(frame.target_vessel, targetVessel);
+                if (frame.control != null && !string.IsNullOrEmpty(frame.control.state))
+                {
+                    controlStatus = frame.control.state;
+                    if (frame.control.waypoint_count > 0)
+                    {
+                        controlStatus += $" {Mathf.Min(frame.control.waypoint_index + 1, frame.control.waypoint_count)}" +
+                                         $"/{frame.control.waypoint_count}";
+                    }
+                    if (!string.IsNullOrEmpty(frame.control.message))
+                        controlStatus += ": " + frame.control.message;
+                }
 
                 if (!droneDetached)
                 {
@@ -216,6 +324,8 @@ namespace UavUsv
 
         private void OnDestroy()
         {
+            if (isConnected)
+                SendBoatStop();
             cancellation?.Cancel();
             try { receiveTask?.Wait(800); } catch (Exception) { }
             cancellation?.Dispose();
