@@ -64,6 +64,24 @@ namespace UavUsv
             out List<Vector2> path,
             out int expandedNodes)
         {
+            return TryPlan(
+                start,
+                goal,
+                obstacles,
+                null,
+                out path,
+                out expandedNodes
+            );
+        }
+
+        public bool TryPlan(
+            Vector2 start,
+            Vector2 goal,
+            IReadOnlyList<CircularObstacle> obstacles,
+            System.Func<Vector2, bool> additionalBlocked,
+            out List<Vector2> path,
+            out int expandedNodes)
+        {
             path = new List<Vector2>();
             expandedNodes = 0;
             if (!InBounds(start) || !InBounds(goal))
@@ -71,7 +89,12 @@ namespace UavUsv
 
             Vector2Int startCell = ToCell(start);
             Vector2Int goalCell = ToCell(goal);
-            bool[] blocked = BuildBlockedGrid(obstacles, startCell, goalCell);
+            bool[] blocked = BuildBlockedGrid(
+                obstacles,
+                additionalBlocked,
+                startCell,
+                goalCell
+            );
             int nodeCount = width * height;
             float[] gScore = new float[nodeCount];
             int[] cameFrom = new int[nodeCount];
@@ -99,7 +122,12 @@ namespace UavUsv
                 if (currentIndex == goalIndex)
                 {
                     path = ReconstructPath(cameFrom, currentIndex, start, goal);
-                    path = Simplify(path, obstacles);
+                    path = Simplify(
+                        path,
+                        obstacles,
+                        additionalBlocked,
+                        cellSize
+                    );
                     return true;
                 }
 
@@ -139,25 +167,34 @@ namespace UavUsv
 
         private bool[] BuildBlockedGrid(
             IReadOnlyList<CircularObstacle> obstacles,
+            System.Func<Vector2, bool> additionalBlocked,
             Vector2Int start,
             Vector2Int goal)
         {
             bool[] blocked = new bool[width * height];
-            if (obstacles == null)
-                return blocked;
 
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
                     Vector2 point = ToWorld(new Vector2Int(x, y));
-                    for (int i = 0; i < obstacles.Count; i++)
+                    if (additionalBlocked != null && additionalBlocked(point))
                     {
-                        CircularObstacle obstacle = obstacles[i];
-                        if ((point - obstacle.Center).sqrMagnitude <= obstacle.Radius * obstacle.Radius)
+                        blocked[y * width + x] = true;
+                        continue;
+                    }
+
+                    if (obstacles != null)
+                    {
+                        for (int i = 0; i < obstacles.Count; i++)
                         {
-                            blocked[y * width + x] = true;
-                            break;
+                            CircularObstacle obstacle = obstacles[i];
+                            if ((point - obstacle.Center).sqrMagnitude <=
+                                obstacle.Radius * obstacle.Radius)
+                            {
+                                blocked[y * width + x] = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -165,7 +202,8 @@ namespace UavUsv
 
             blocked[Index(start)] = false;
             blocked[Index(goal)] = false;
-            ClearStartEscapeCorridors(blocked, start, goal, obstacles);
+            if (obstacles != null)
+                ClearStartEscapeCorridors(blocked, start, goal, obstacles);
             return blocked;
         }
 
@@ -234,7 +272,9 @@ namespace UavUsv
 
         private static List<Vector2> Simplify(
             IReadOnlyList<Vector2> rawPath,
-            IReadOnlyList<CircularObstacle> obstacles)
+            IReadOnlyList<CircularObstacle> obstacles,
+            System.Func<Vector2, bool> additionalBlocked,
+            float sampleSpacing)
         {
             if (rawPath.Count <= 2)
                 return new List<Vector2>(rawPath);
@@ -246,7 +286,12 @@ namespace UavUsv
                 int furthestVisible = anchor + 1;
                 for (int candidate = rawPath.Count - 1; candidate > anchor + 1; candidate--)
                 {
-                    if (SegmentIsClear(rawPath[anchor], rawPath[candidate], obstacles))
+                    if (SegmentIsClear(
+                            rawPath[anchor],
+                            rawPath[candidate],
+                            obstacles,
+                            additionalBlocked,
+                            sampleSpacing))
                     {
                         furthestVisible = candidate;
                         break;
@@ -263,22 +308,39 @@ namespace UavUsv
         private static bool SegmentIsClear(
             Vector2 start,
             Vector2 end,
-            IReadOnlyList<CircularObstacle> obstacles)
+            IReadOnlyList<CircularObstacle> obstacles,
+            System.Func<Vector2, bool> additionalBlocked,
+            float sampleSpacing)
         {
-            if (obstacles == null)
-                return true;
-
             Vector2 segment = end - start;
             float lengthSquared = segment.sqrMagnitude;
-            for (int i = 0; i < obstacles.Count; i++)
+            if (obstacles != null)
             {
-                CircularObstacle obstacle = obstacles[i];
-                float t = lengthSquared > .0001f
-                    ? Mathf.Clamp01(Vector2.Dot(obstacle.Center - start, segment) / lengthSquared)
-                    : 0f;
-                Vector2 closest = start + segment * t;
-                if ((closest - obstacle.Center).sqrMagnitude <= obstacle.Radius * obstacle.Radius)
-                    return false;
+                for (int i = 0; i < obstacles.Count; i++)
+                {
+                    CircularObstacle obstacle = obstacles[i];
+                    float t = lengthSquared > .0001f
+                        ? Mathf.Clamp01(Vector2.Dot(obstacle.Center - start, segment) / lengthSquared)
+                        : 0f;
+                    Vector2 closest = start + segment * t;
+                    if ((closest - obstacle.Center).sqrMagnitude <=
+                        obstacle.Radius * obstacle.Radius)
+                        return false;
+                }
+            }
+
+            if (additionalBlocked != null)
+            {
+                float length = Mathf.Sqrt(lengthSquared);
+                int samples = Mathf.Max(
+                    1,
+                    Mathf.CeilToInt(length / Mathf.Max(.25f, sampleSpacing * .5f))
+                );
+                for (int i = 1; i < samples; i++)
+                {
+                    if (additionalBlocked(Vector2.Lerp(start, end, (float)i / samples)))
+                        return false;
+                }
             }
 
             return true;

@@ -114,18 +114,18 @@ Shader "UavUsv/WindOcean"
             float distortion = lerp(0.002, 0.008, saturate(viewDistance / 90.0));
             reflectionUv += microNormal * distortion;
             float2 blurOffset = _PlanarReflectionTex_TexelSize.xy * lerp(1.5, 4.0, saturate(viewDistance / 100.0));
-            half3 planarReflection = tex2D(_PlanarReflectionTex, reflectionUv).rgb * 0.38;
-            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2( blurOffset.x, 0)).rgb * 0.155;
-            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2(-blurOffset.x, 0)).rgb * 0.155;
-            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2(0,  blurOffset.y)).rgb * 0.155;
-            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2(0, -blurOffset.y)).rgb * 0.155;
-            planarReflection = planarReflection / (1.0 + planarReflection * 0.18);
-            float reflectionWeight = saturate(_ReflectionAvailable) * saturate(0.18 + fresnel * 0.82);
+            half3 planarReflection = tex2D(_PlanarReflectionTex, reflectionUv).rgb * 0.34;
+            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2( blurOffset.x, 0)).rgb * 0.14;
+            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2(-blurOffset.x, 0)).rgb * 0.14;
+            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2(0,  blurOffset.y)).rgb * 0.14;
+            planarReflection += tex2D(_PlanarReflectionTex, reflectionUv + float2(0, -blurOffset.y)).rgb * 0.14;
+            planarReflection = planarReflection / (1.0 + planarReflection * 0.28);
+            float reflectionWeight = saturate(_ReflectionAvailable) * saturate(0.12 + fresnel * 0.58);
             environment = lerp(environment, planarReflection, reflectionWeight);
-            o.Albedo = lerp(water * 0.8, _FoamColor.rgb, crest * 0.16);
+            o.Albedo = lerp(water * 0.86, _FoamColor.rgb, crest * 0.09);
             o.Metallic = 0.02;
             o.Smoothness = lerp(0.95, 0.76, crest);
-            o.Emission = water * 0.035 + environment * (0.12 + fresnel * 0.5) + _FoamColor.rgb * crest * 0.055;
+            o.Emission = water * 0.028 + environment * (0.075 + fresnel * 0.34) + _FoamColor.rgb * crest * 0.032;
             o.Alpha = 1;
         }
         ENDCG

@@ -6,7 +6,7 @@ namespace UavUsv
     public sealed class SimulationBootstrap : MonoBehaviour
     {
         [Tooltip("Use external ROS/Gazebo pose data in Unity Editor Play mode.")]
-        public bool useExternalPoseInEditor = true;
+        public bool useExternalPoseInEditor = false;
 
         [Tooltip("Prefer WebSocket instead of UDP for external ROS/Gazebo pose data.")]
         public bool useWebSocketPose = true;
@@ -23,10 +23,14 @@ namespace UavUsv
         [Tooltip("Automatically run demo motion after pressing Play.")]
         public bool playMissionInEditor = false;
 
+        [Tooltip("Run the local 3 USV + 3 UAV + 1 target capture-defense scenario when ROS sync is not active.")]
+        public bool runLocalMultiAgentScenarioInEditor = true;
+
         private CooperativeMission mission;
         private RosUdpBridge bridge;
         private ExternalPoseReceiver externalReceiver;
         private ExternalPoseWebSocketClient webSocketReceiver;
+        private MultiAgentCaptureDefenseScenario multiAgentScenario;
         private GUIStyle titleStyle;
         private GUIStyle bodyStyle;
 
@@ -37,31 +41,56 @@ namespace UavUsv
             QualitySettings.anisotropicFiltering = AnisotropicFiltering.ForceEnable;
 
             RenderSettings.fog = true;
-            RenderSettings.fogColor = new Color(.56f, .7f, .82f);
-            RenderSettings.fogDensity = .0012f;
+            RenderSettings.fogColor = new Color(.6f, .73f, .82f);
+            RenderSettings.fogDensity = .0017f;
 
             BuildLighting();
             BuildOcean();
 
+            SydneyCoastRuntime coastline = SydneyCoastRuntime.Create();
             Transform lighthouse = BuildLighthouse();
-            Transform boat = BuildBoat();
-            Transform deck = boat.Find("LandingDeck");
-            Transform drone = BuildDrone(deck, out DroneVisual droneVisual);
+            Transform shoreBase = BuildShoreBaseStation(out Transform[] dronePads);
+            var boats = new List<Transform>();
+            var drones = new List<Transform>();
+            var droneVisuals = new List<DroneVisual>();
+
+            for (int i = 0; i < 3; i++)
+            {
+                Transform builtBoat = BuildBoat("USV-" + (i + 1));
+                boats.Add(builtBoat);
+
+                Transform builtDrone = BuildDrone(dronePads[Mathf.Min(i, dronePads.Length - 1)], out DroneVisual droneVisual, "UAV-" + (i + 1));
+                drones.Add(builtDrone);
+                droneVisuals.Add(droneVisual);
+            }
+
+            Transform boat = boats[0];
+            Transform drone = drones[0];
             Transform buoyWest = BuildBuoy("WestChannelBuoy", -42f, 44f, .25f);
             Transform buoySouth = BuildBuoy("SouthChannelBuoy", 34f, -56f, -.35f);
             Transform buoyEast = BuildBuoy("EastChannelBuoy", 78f, 28f, .7f);
+            Transform movingBarrier = BuildBuoy("DynamicBarrierBuoy", 28f, -8f, 0f);
+            Transform crossingBarrier = BuildBuoy("CrossingBarrierBuoy", 55f, -30f, .4f);
             Transform targetVessel = BuildTargetVessel();
-            targetVessel.gameObject.SetActive(false);
+            Transform targetPoint = BuildTargetPoint();
+            DeploySearchFormation(boats, drones, droneVisuals, dronePads, targetPoint, shoreBase);
 
-            mission = gameObject.AddComponent<CooperativeMission>();
-            mission.boat = boat;
-            mission.deck = deck;
-            mission.drone = drone;
-            mission.droneVisual = droneVisual;
-            mission.cruiseWithDroneOnDeck = false;
-
-            if (Application.isEditor)
-                mission.automatic = playMissionInEditor;
+            Transform[] senseObstacles =
+            {
+                lighthouse, buoyWest, buoySouth, buoyEast, shoreBase, movingBarrier, crossingBarrier, targetVessel
+            };
+            AttachObstacleColliders(senseObstacles);
+            var boatSensors = new List<AgentSensorSuite>();
+            var droneSensors = new List<AgentSensorSuite>();
+            // During search, use a wider FOV so approaching USVs can acquire the target earlier.
+            for (int i = 0; i < boats.Count; i++)
+            {
+                AgentSensorSuite sensor = AttachSensor(boats[i], AgentSensorSuite.SensorKind.Surface, 38f, 52f, senseObstacles);
+                sensor.horizontalFovDegrees = 160f;
+                boatSensors.Add(sensor);
+            }
+            for (int i = 0; i < drones.Count; i++)
+                droneSensors.Add(AttachSensor(drones[i], AgentSensorSuite.SensorKind.Air, 30f, 52f, senseObstacles));
 
             string urlArgument = GetArgumentValue("--ros-ws-url=");
             if (!string.IsNullOrEmpty(urlArgument))
@@ -74,15 +103,15 @@ namespace UavUsv
             if (!string.IsNullOrEmpty(platformTokenArgument))
                 platformToken = platformTokenArgument;
 
-            bool externalSync = HasArgument("--ros-sync") || HasArgument("--ros-ws") || (Application.isEditor && useExternalPoseInEditor);
+            bool externalSync = HasArgument("--ros-sync") || HasArgument("--ros-ws");
             if (externalSync)
             {
-                mission.automatic = false;
-                mission.enabled = false;
-
-                BoatWaveMotion boatWave = boat.GetComponent<BoatWaveMotion>();
-                if (boatWave)
-                    boatWave.enabled = false;
+                foreach (Transform syncedBoat in boats)
+                {
+                    BoatWaveMotion boatWave = syncedBoat ? syncedBoat.GetComponent<BoatWaveMotion>() : null;
+                    if (boatWave)
+                        boatWave.enabled = false;
+                }
 
                 bool useWebSocket = !HasArgument("--ros-udp-pose") && (useWebSocketPose || HasArgument("--ros-ws"));
                 if (useWebSocket)
@@ -107,6 +136,9 @@ namespace UavUsv
                     pathPlanning.buoyEast = buoyEast;
                     pathPlanning.targetVessel = targetVessel;
                     pathPlanning.webSocket = webSocketReceiver;
+                    pathPlanning.SetCoastlineCollisionRoot(
+                        coastline ? coastline.collisionRoot : null
+                    );
                 }
                 else
                 {
@@ -118,12 +150,61 @@ namespace UavUsv
             }
             else
             {
-                bridge = gameObject.AddComponent<RosUdpBridge>();
-                bridge.mission = mission;
-                bridge.enabledBridge = HasArgument("--ros-udp");
+                bool legacyDeckDemo = HasArgument("--legacy-deck-demo");
+                MultiAgentCaptureDefenseScenario scenario =
+                    gameObject.AddComponent<MultiAgentCaptureDefenseScenario>();
+                scenario.shoreBase = shoreBase;
+                scenario.targetPoint = targetPoint;
+                scenario.targetVessel = targetVessel;
+                scenario.dynamicBarrier = movingBarrier;
+                scenario.obstacles = new[]
+                {
+                    lighthouse, buoyWest, buoySouth, buoyEast, shoreBase, movingBarrier, crossingBarrier
+                };
+                scenario.boats = boats.ToArray();
+                scenario.drones = drones.ToArray();
+                scenario.dronePads = dronePads;
+                scenario.droneVisuals = droneVisuals.ToArray();
+                scenario.boatSensors = boatSensors.ToArray();
+                scenario.droneSensors = droneSensors.ToArray();
+                scenario.searchStartRadius = 72f;
+                scenario.SetCoastlineCollisionRoot(coastline ? coastline.collisionRoot : null);
+                scenario.automatic = !Application.isEditor || runLocalMultiAgentScenarioInEditor || playMissionInEditor;
+                scenario.enabled = !legacyDeckDemo;
+                multiAgentScenario = scenario;
+
+                ShoreBaseController baseController = gameObject.AddComponent<ShoreBaseController>();
+                baseController.shoreBase = shoreBase;
+                baseController.boats = boats.ToArray();
+                baseController.drones = drones.ToArray();
+                baseController.targetPoint = targetPoint;
+                baseController.scenario = scenario;
+                baseController.automatic = scenario.automatic;
+                scenario.baseController = baseController;
+
+                CrossingBarrierMotion crossing = crossingBarrier.gameObject.AddComponent<CrossingBarrierMotion>();
+                crossing.amplitude = 14f;
+                crossing.passDuration = 8f;
+                crossing.maxPasses = 2;
+
+                if (legacyDeckDemo)
+                {
+                    Transform deck = boat.Find("LandingDeck");
+                    mission = gameObject.AddComponent<CooperativeMission>();
+                    mission.boat = boat;
+                    mission.deck = deck;
+                    mission.drone = drone;
+                    mission.droneVisual = droneVisuals[0];
+                    mission.cruiseWithDroneOnDeck = false;
+                    mission.automatic = playMissionInEditor;
+
+                    bridge = gameObject.AddComponent<RosUdpBridge>();
+                    bridge.mission = mission;
+                    bridge.enabledBridge = HasArgument("--ros-udp");
+                }
             }
 
-            BuildCamera(boat, drone, lighthouse);
+            BuildCamera(boat, drone, targetPoint ? targetPoint : lighthouse);
             lighthouse.gameObject.AddComponent<BeaconSweep>();
 
             PlatformHeartbeat heartbeat = gameObject.AddComponent<PlatformHeartbeat>();
@@ -151,6 +232,126 @@ namespace UavUsv
             }
 
             return null;
+        }
+
+        private static void DeploySearchFormation(
+            IReadOnlyList<Transform> boats,
+            IReadOnlyList<Transform> drones,
+            IReadOnlyList<DroneVisual> droneVisuals,
+            Transform[] dronePads,
+            Transform targetPoint,
+            Transform shoreBase)
+        {
+            Vector2 center = new Vector2(40f, -20f);
+            float[] boatAngles = { 0f, 120f, 240f };
+            const float startRadius = 72f;
+            Vector2[] preferredBoatStarts =
+            {
+                new Vector2(105f, -20f),
+                new Vector2(-2f, 32f),
+                new Vector2(-2f, -72f)
+            };
+
+            Vector3 lookTarget = targetPoint
+                ? targetPoint.position
+                : Coordinates.ToUnity(40f, -20f, .42f);
+
+            for (int i = 0; boats != null && i < boats.Count; i++)
+            {
+                Transform boat = boats[i];
+                if (!boat)
+                    continue;
+
+                Vector2 start = i < preferredBoatStarts.Length
+                    ? preferredBoatStarts[i]
+                    : PointAround(center, boatAngles[i % boatAngles.Length], startRadius);
+                boat.position = Coordinates.ToUnity(start.x, start.y, .42f);
+                FaceSurfaceAgent(boat, lookTarget);
+            }
+
+            for (int i = 0; drones != null && i < drones.Count; i++)
+            {
+                Transform drone = drones[i];
+                if (!drone)
+                    continue;
+
+                Transform pad = dronePads != null && i < dronePads.Length ? dronePads[i] : null;
+                if (pad)
+                {
+                    drone.SetParent(pad, false);
+                    drone.localPosition = new Vector3(0f, .28f, 0f);
+                    drone.localRotation = Quaternion.identity;
+                }
+                else if (shoreBase)
+                {
+                    drone.SetParent(null, true);
+                    drone.position = shoreBase.position + new Vector3(-6f + i * 6f, .62f, 2.4f);
+                }
+
+                if (droneVisuals != null && i < droneVisuals.Count && droneVisuals[i])
+                    droneVisuals[i].spinning = false;
+            }
+        }
+
+        private static Vector2 PointAround(Vector2 center, float angleDegrees, float radius)
+        {
+            float angle = angleDegrees * Mathf.Deg2Rad;
+            return center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+        }
+
+        private static AgentSensorSuite AttachSensor(
+            Transform agent,
+            AgentSensorSuite.SensorKind kind,
+            float lidarRange,
+            float radarRange,
+            Transform[] obstacles)
+        {
+            AgentSensorSuite sensor = agent.gameObject.AddComponent<AgentSensorSuite>();
+            sensor.Configure(kind, lidarRange, radarRange, obstacles);
+            sensor.drawDebugRays = false;
+            return sensor;
+        }
+
+        private static void AttachObstacleColliders(Transform[] obstacles)
+        {
+            if (obstacles == null)
+                return;
+
+            for (int i = 0; i < obstacles.Length; i++)
+            {
+                Transform obstacle = obstacles[i];
+                if (!obstacle || obstacle.GetComponent<Collider>())
+                    continue;
+
+                SphereCollider collider = obstacle.gameObject.AddComponent<SphereCollider>();
+                collider.isTrigger = false;
+                string name = obstacle.name;
+                if (name.Contains("Lighthouse"))
+                    collider.radius = 2.2f;
+                else if (name.Contains("ShoreBase"))
+                    collider.radius = 6f;
+                else if (name.Contains("Target"))
+                    collider.radius = 4.2f;
+                else
+                    collider.radius = 1.4f;
+                collider.center = new Vector3(0f, collider.radius, 0f);
+            }
+        }
+
+        private static void FaceSurfaceAgent(Transform source, Vector3 target)
+        {
+            Vector3 delta = target - source.position;
+            delta.y = 0f;
+            if (delta.sqrMagnitude > .001f)
+                source.rotation = Quaternion.LookRotation(delta.normalized, Vector3.up) * Quaternion.Euler(0f, -90f, 0f);
+        }
+
+        private static void FaceAirAgent(Transform source, Vector3 target)
+        {
+            Vector3 delta = target - source.position;
+            delta.y = 0f;
+            if (delta.sqrMagnitude > .001f)
+                source.rotation = Quaternion.LookRotation(delta.normalized, Vector3.up);
         }
 
         private void BuildLighting()
@@ -207,6 +408,8 @@ namespace UavUsv
 
         private void BuildOcean()
         {
+            BuildOceanUnderlay();
+
             var ocean = new GameObject("Ocean") { layer = 4 };
             ocean.AddComponent<MeshFilter>();
 
@@ -214,14 +417,69 @@ namespace UavUsv
             renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             renderer.receiveShadows = false;
 
-            ocean.AddComponent<OceanSurface>();
-            ocean.AddComponent<PlanarWaterReflection>();
+            OceanSurface surface = ocean.AddComponent<OceanSurface>();
+            surface.size = 2200f;
+            surface.resolution = 260;
+            surface.edgeIrregularity = .02f;
+        }
+
+        private static void BuildOceanUnderlay()
+        {
+            var underlay = new GameObject("Coastal Water Fill") { layer = 4 };
+            underlay.transform.position = new Vector3(0f, -.16f, 0f);
+
+            Mesh mesh = new Mesh
+            {
+                name = "Coastal Water Fill Mesh",
+                indexFormat = UnityEngine.Rendering.IndexFormat.UInt32
+            };
+            float half = 760f;
+            mesh.vertices = new[]
+            {
+                new Vector3(-half, 0f, -half),
+                new Vector3(-half, 0f, half),
+                new Vector3(half, 0f, -half),
+                new Vector3(half, 0f, half)
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f),
+                new Vector2(0f, 1f),
+                new Vector2(1f, 0f),
+                new Vector2(1f, 1f)
+            };
+            mesh.triangles = new[] { 0, 1, 2, 2, 1, 3 };
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+
+            MeshFilter filter = underlay.AddComponent<MeshFilter>();
+            filter.sharedMesh = mesh;
+            MeshRenderer renderer = underlay.AddComponent<MeshRenderer>();
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+
+            Shader shader = Resources.Load<Shader>("WindOcean") ??
+                            Shader.Find("UavUsv/WindOcean");
+            if (shader)
+            {
+                Material material = new Material(shader)
+                {
+                    name = "Coastal Water Fill Material"
+                };
+                material.SetColor("_DeepColor", new Color(.035f, .17f, .22f, 1f));
+                material.SetColor("_ShallowColor", new Color(.075f, .31f, .37f, 1f));
+                material.SetColor("_FoamColor", new Color(.72f, .86f, .88f, 1f));
+                material.SetFloat("_WaveAmplitude", .06f);
+                material.SetFloat("_WindSpeed", 3.2f);
+                renderer.sharedMaterial = material;
+            }
         }
 
         private Transform BuildLighthouse()
         {
             Transform root = new GameObject("NavigationLighthouse").transform;
-            root.position = Coordinates.ToUnity(35, 18, 0);
+            // Keep lighthouse as a channel obstacle, but off the USV approach axes.
+            root.position = Coordinates.ToUnity(-55f, 35f, 0f);
 
             Material stone = SceneFactory.Material("Stone", new Color(.16f, .16f, .14f));
             Material white = SceneFactory.Material("Ivory", new Color(.95f, .93f, .84f), 0, .22f);
@@ -246,17 +504,76 @@ namespace UavUsv
             return root;
         }
 
-        private Transform BuildBoat()
+        private Transform BuildShoreBaseStation(out Transform[] dronePads)
         {
-            Transform root = new GameObject("LandingBoat").transform;
-            root.position = Coordinates.ToUnity(0, 0, .42f);
+            Transform root = new GameObject("ShoreBaseStation").transform;
+            root.position = Coordinates.ToUnity(-10f, -32f, 0f);
 
-            Material dark = SceneFactory.Material("HullDark", new Color(.06f, .07f, .08f), .2f, .45f);
-            Material orange = SceneFactory.Material("RescueOrange", new Color(.95f, .24f, .035f), .12f, .42f);
-            Material deckMat = SceneFactory.Material("Deck", new Color(.17f, .17f, .16f));
-            Material cabin = SceneFactory.Material("Cabin", new Color(.92f, .9f, .78f));
+            Material deck = SceneFactory.Material("Helipad Deck", new Color(.17f, .19f, .19f), .01f, .3f);
+            Material walkway = SceneFactory.Material("Helipad Walkway", new Color(.34f, .36f, .36f), .01f, .28f);
+            Material cabin = SceneFactory.Material("Base Cabin", new Color(.08f, .09f, .1f), .08f, .4f);
+            Material glass = SceneFactory.Material("Base Glass", new Color(.08f, .55f, .95f, .62f), .05f, .92f);
+            Material white = SceneFactory.Material("Helipad H", new Color(1f, 1f, .96f), 0f, .3f);
+            Material yellow = SceneFactory.Material("Helipad Edge", new Color(1f, .82f, .1f), .03f, .45f);
+            Material blue = SceneFactory.Material("Command Antenna", new Color(.05f, .36f, .9f), .12f, .55f);
+
+            dronePads = new Transform[3];
+            for (int i = 0; i < dronePads.Length; i++)
+            {
+                Transform pad = new GameObject("UAVPad-" + (i + 1)).transform;
+                pad.SetParent(root, false);
+                pad.localPosition = new Vector3(-6f + i * 6f, .34f, 2.4f);
+                dronePads[i] = pad;
+
+                SceneFactory.Primitive("DeckSurface", PrimitiveType.Cylinder, pad, Vector3.zero, new Vector3(2.2f, .035f, 2.2f), deck);
+                SceneFactory.Primitive("HLeft", PrimitiveType.Cube, pad, new Vector3(0f, .045f, -.35f), new Vector3(1f, .018f, .12f), white);
+                SceneFactory.Primitive("HRight", PrimitiveType.Cube, pad, new Vector3(0f, .045f, .35f), new Vector3(1f, .018f, .12f), white);
+                SceneFactory.Primitive("HCrossbar", PrimitiveType.Cube, pad, new Vector3(0f, .05f, 0f), new Vector3(.16f, .02f, .82f), white);
+                SceneFactory.Primitive("PadEdge", PrimitiveType.Cylinder, pad, new Vector3(0f, .02f, 0f), new Vector3(2.45f, .012f, 2.45f), yellow);
+            }
+
+            SceneFactory.Primitive("ShoreWalkway", PrimitiveType.Cube, root, new Vector3(0f, .25f, 0f), new Vector3(18f, .22f, 5.5f), walkway);
+            SceneFactory.Primitive("CommandCabin", PrimitiveType.Cube, root, new Vector3(-6.6f, 1.2f, -1.5f), new Vector3(3.2f, 1.7f, 2.2f), cabin);
+            SceneFactory.Primitive("CommandWindow", PrimitiveType.Cube, root, new Vector3(-4.95f, 1.35f, -1.5f), new Vector3(.06f, .7f, 1.7f), glass);
+            SceneFactory.Primitive("AntennaMast", PrimitiveType.Cylinder, root, new Vector3(-7.7f, 3.15f, -1.5f), new Vector3(.08f, 1.55f, .08f), blue);
+            SceneFactory.Primitive("AntennaDish", PrimitiveType.Sphere, root, new Vector3(-7.7f, 4.75f, -1.5f), Vector3.one * .28f, glass);
+
+            Light signal = new GameObject("BaseSignalLight").AddComponent<Light>();
+            signal.transform.SetParent(root, false);
+            signal.transform.localPosition = new Vector3(-7.7f, 4.75f, -1.5f);
+            signal.type = LightType.Point;
+            signal.range = 34f;
+            signal.intensity = 1.4f;
+            signal.color = new Color(.2f, .75f, 1f);
+
+            return root;
+        }
+
+        private Transform BuildTargetPoint()
+        {
+            Transform root = new GameObject("CaptureTargetPoint").transform;
+            root.position = Coordinates.ToUnity(40f, -20f, .38f);
+
+            Material amber = SceneFactory.Material("Target Point Amber", new Color(1f, .54f, .05f, .9f), .05f, .72f);
+            Material red = SceneFactory.Material("Target Point Red", new Color(1f, .08f, .02f, .68f), .05f, .65f);
+            SceneFactory.Primitive("TargetRingOuter", PrimitiveType.Cylinder, root, Vector3.zero, new Vector3(1f, .02f, 1f), amber);
+            SceneFactory.Primitive("TargetRingInner", PrimitiveType.Cylinder, root, new Vector3(0f, .026f, 0f), new Vector3(.55f, .018f, .55f), red);
+            SceneFactory.Primitive("TargetBeacon", PrimitiveType.Sphere, root, new Vector3(0f, .55f, 0f), Vector3.one * .18f, amber);
+            return root;
+        }
+
+        private Transform BuildBoat(string name = "LandingBoat")
+        {
+            Transform root = new GameObject(name).transform;
+            root.position = Coordinates.ToUnity(0, 0, .42f);
+            root.localScale = Vector3.one * 2f;
+
+            Material dark = SceneFactory.Material(name + " HullDark", new Color(.06f, .07f, .08f), .2f, .45f);
+            Material orange = SceneFactory.Material(name + " RescueOrange", new Color(.95f, .24f, .035f), .12f, .42f);
+            Material deckMat = SceneFactory.Material(name + " Deck", new Color(.17f, .17f, .16f));
+            Material cabin = SceneFactory.Material(name + " Cabin", new Color(.92f, .9f, .78f));
             Material window = SceneFactory.Material("Window", new Color(.04f, .26f, .48f, .72f), .1f, .9f);
-            Material white = SceneFactory.Material("PadWhite", Color.white, 0, .25f);
+            Material white = SceneFactory.Material(name + " PadWhite", Color.white, 0, .25f);
 
             SceneFactory.Primitive("LowerHull", PrimitiveType.Cube, root, new Vector3(-.05f, -.16f, 0), new Vector3(2.45f, .28f, .82f), dark);
             SceneFactory.Primitive("UpperHull", PrimitiveType.Cube, root, new Vector3(-.1f, .05f, 0), new Vector3(2.35f, .32f, .94f), orange);
@@ -319,35 +636,66 @@ namespace UavUsv
 
         private Transform BuildTargetVessel()
         {
+            // Hostile/neutral freighter look — distinct from orange rescue USVs.
             Transform root = new GameObject("TargetVessel").transform;
+            root.position = Coordinates.ToUnity(40f, -20f, .5f);
 
-            Material hull = SceneFactory.Material("Target Hull", new Color(.06f, .2f, .36f), .15f, .42f);
-            Material upper = SceneFactory.Material("Target Upper", new Color(.88f, .88f, .82f), 0, .25f);
-            Material window = SceneFactory.Material("Target Window", new Color(.04f, .28f, .46f), .1f, .85f);
-            Material dark = SceneFactory.Material("Target Mast", new Color(.1f, .1f, .1f), .15f, .4f);
+            Material hull = SceneFactory.Material("Target Hull", new Color(.12f, .14f, .16f), .25f, .38f);
+            Material bootTop = SceneFactory.Material("Target BootTop", new Color(.72f, .08f, .05f), .08f, .42f);
+            Material deck = SceneFactory.Material("Target Deck", new Color(.55f, .52f, .46f), .05f, .28f);
+            Material white = SceneFactory.Material("Target Superstructure", new Color(.93f, .93f, .9f), 0f, .22f);
+            Material window = SceneFactory.Material("Target Window", new Color(.05f, .55f, .75f, .82f), .08f, .9f);
+            Material funnel = SceneFactory.Material("Target Funnel", new Color(.78f, .12f, .08f), .1f, .4f);
+            Material dark = SceneFactory.Material("Target Rig", new Color(.08f, .08f, .09f), .2f, .5f);
+            Material crane = SceneFactory.Material("Target Crane", new Color(.75f, .55f, .12f), .15f, .45f);
+            Material amber = SceneFactory.Material("Target Beacon", new Color(1f, .55f, .08f), .05f, .85f);
 
-            SceneFactory.Primitive("LowerHull", PrimitiveType.Cube, root, new Vector3(-.2f, -.2f, 0), new Vector3(6.7f, .55f, 2.3f), hull);
-            SceneFactory.Primitive("UpperHull", PrimitiveType.Cube, root, new Vector3(-.35f, .18f, 0), new Vector3(6.2f, .35f, 2.4f), upper);
-            SceneFactory.Primitive("Cabin", PrimitiveType.Cube, root, new Vector3(-.4f, .85f, 0), new Vector3(2.1f, 1.25f, 1.65f), upper);
-            SceneFactory.Primitive("BridgeWindow", PrimitiveType.Cube, root, new Vector3(.68f, 1f, 0), new Vector3(.04f, .55f, 1.35f), window);
-            SceneFactory.Primitive("Mast", PrimitiveType.Cylinder, root, new Vector3(-.6f, 2.1f, 0), new Vector3(.12f, 1.1f, .12f), dark);
+            // Long cargo hull with pointed bow — not the short orange USV silhouette.
+            SceneFactory.Primitive("LowerHull", PrimitiveType.Cube, root, new Vector3(-.15f, -.22f, 0f), new Vector3(9.2f, .55f, 2.55f), hull);
+            SceneFactory.Primitive("BootTopStripe", PrimitiveType.Cube, root, new Vector3(-.15f, .08f, 0f), new Vector3(9.15f, .08f, 2.62f), bootTop);
+            SceneFactory.Primitive("MainDeck", PrimitiveType.Cube, root, new Vector3(-.35f, .28f, 0f), new Vector3(8.4f, .18f, 2.45f), deck);
+            SceneFactory.Cone("Bow", root, new Vector3(4.85f, .05f, 0f), .95f, 1.55f, hull, new Vector3(0f, 0f, -90f));
+            SceneFactory.Primitive("SternTransom", PrimitiveType.Cube, root, new Vector3(-4.55f, .05f, 0f), new Vector3(.35f, .7f, 2.35f), hull);
 
-            Light navigation = new GameObject("NavigationLight").AddComponent<Light>();
-            navigation.transform.SetParent(root, false);
-            navigation.transform.localPosition = new Vector3(-.6f, 3.25f, 0);
-            navigation.type = LightType.Point;
-            navigation.range = 30f;
-            navigation.intensity = 1.2f;
-            navigation.color = new Color(.2f, 1f, .35f);
+            // Raised white bridge / accommodation block aft of midships.
+            SceneFactory.Primitive("BridgeHouse", PrimitiveType.Cube, root, new Vector3(-1.8f, 1.05f, 0f), new Vector3(2.6f, 1.35f, 2.05f), white);
+            SceneFactory.Primitive("BridgeWing", PrimitiveType.Cube, root, new Vector3(-1.1f, 1.55f, 0f), new Vector3(1.1f, .35f, 2.55f), white);
+            SceneFactory.Primitive("BridgeWindowFront", PrimitiveType.Cube, root, new Vector3(-.48f, 1.35f, 0f), new Vector3(.05f, .55f, 1.7f), window);
+            SceneFactory.Primitive("BridgeWindowPort", PrimitiveType.Cube, root, new Vector3(-1.8f, 1.3f, 1.05f), new Vector3(1.6f, .4f, .05f), window);
+            SceneFactory.Primitive("BridgeWindowStbd", PrimitiveType.Cube, root, new Vector3(-1.8f, 1.3f, -1.05f), new Vector3(1.6f, .4f, .05f), window);
+            SceneFactory.Primitive("RadarMast", PrimitiveType.Cylinder, root, new Vector3(-1.6f, 2.55f, 0f), new Vector3(.07f, .85f, .07f), dark);
+            SceneFactory.Primitive("RadarDome", PrimitiveType.Sphere, root, new Vector3(-1.6f, 3.45f, 0f), Vector3.one * .32f, white);
+
+            // Cargo hatches + deck crane forward — reads as freighter, not rescue boat.
+            SceneFactory.Primitive("HatchForward", PrimitiveType.Cube, root, new Vector3(2.1f, .42f, 0f), new Vector3(2.4f, .12f, 1.7f), dark);
+            SceneFactory.Primitive("HatchMid", PrimitiveType.Cube, root, new Vector3(.2f, .42f, 0f), new Vector3(2.1f, .12f, 1.7f), dark);
+            SceneFactory.Primitive("CranePedestal", PrimitiveType.Cylinder, root, new Vector3(1.2f, 1.05f, 0f), new Vector3(.22f, .55f, .22f), crane);
+            SceneFactory.Primitive("CraneBoom", PrimitiveType.Cube, root, new Vector3(2.35f, 1.55f, 0f), new Vector3(2.6f, .12f, .16f), crane, new Vector3(0f, 0f, -18f));
+
+            SceneFactory.Primitive("Funnel", PrimitiveType.Cylinder, root, new Vector3(-2.85f, 2.15f, 0f), new Vector3(.55f, .75f, .55f), funnel);
+            SceneFactory.Primitive("FunnelCap", PrimitiveType.Cylinder, root, new Vector3(-2.85f, 2.95f, 0f), new Vector3(.62f, .08f, .62f), dark);
+
+            Light nav = new GameObject("TargetNavLight").AddComponent<Light>();
+            nav.transform.SetParent(root, false);
+            nav.transform.localPosition = new Vector3(-1.6f, 3.55f, 0f);
+            nav.type = LightType.Point;
+            nav.range = 34f;
+            nav.intensity = 1.35f;
+            nav.color = new Color(1f, .45f, .08f);
+
+            SceneFactory.Primitive("BowBeacon", PrimitiveType.Sphere, root, new Vector3(4.2f, 1.05f, 0f), Vector3.one * .18f, amber);
+
+            BoatWaveMotion wave = root.gameObject.AddComponent<BoatWaveMotion>();
+            wave.meanHeight = .5f;
             return root;
         }
 
-        private Transform BuildDrone(Transform deck, out DroneVisual visual)
+        private Transform BuildDrone(Transform deck, out DroneVisual visual, string name = "X500Drone")
         {
-            Transform root = new GameObject("X500Drone").transform;
+            Transform root = new GameObject(name).transform;
             root.SetParent(deck, false);
             root.localPosition = new Vector3(0, .28f, 0);
-            root.localScale = Vector3.one * 1.18f;
+            root.localScale = Vector3.one * 3f;
 
             Material carbon = SceneFactory.Material("Carbon", new Color(.035f, .04f, .045f), .35f, .65f);
             Material accent = SceneFactory.Material("DroneAccent", new Color(.9f, .14f, .025f), .15f, .55f);
@@ -456,7 +804,7 @@ namespace UavUsv
             Camera camera = go.AddComponent<Camera>();
             camera.fieldOfView = 58f;
             camera.nearClipPlane = .1f;
-            camera.farClipPlane = 500f;
+            camera.farClipPlane = 900f;
             camera.allowHDR = true;
             camera.allowMSAA = true;
 
@@ -491,27 +839,33 @@ namespace UavUsv
                 normal = { textColor = new Color(.9f, .96f, 1f) }
             };
 
-            GUI.Box(new Rect(16, 16, 360, 142), "");
-            GUI.Label(new Rect(30, 27, 330, 28), "UAV-USV Maritime Simulation", titleStyle);
-
             string syncStatus = webSocketReceiver
                 ? webSocketReceiver.connectionStatus
                 : externalReceiver ? externalReceiver.connectionStatus : null;
+            bool localMultiAgent = syncStatus == null && multiAgentScenario && multiAgentScenario.enabled;
+            float panelY = localMultiAgent ? 280f : 16f;
+
+            GUI.Box(new Rect(16, panelY, 360, 142), "");
+            GUI.Label(new Rect(30, panelY + 11, 330, 28), "UAV-USV Maritime Simulation", titleStyle);
 
             string status = syncStatus != null
                 ? "External sync: " + syncStatus
-                : "Mission phase: " + (mission ? mission.Status : "Initializing");
+                : localMultiAgent
+                    ? "Mission phase: " + multiAgentScenario.Status
+                    : "Mission phase: " + (mission ? mission.Status : "Initializing");
 
             string controls = syncStatus != null
                 ? "ROS/Gazebo authoritative motion\n"
-                : "SPACE: launch mission    R: reset\n";
+                : localMultiAgent
+                    ? "M: pause  R: reset  B: force dispatch\n"
+                    : "SPACE: launch mission    R: reset\n";
 
             string bridgeText = syncStatus != null
                 ? (webSocketReceiver ? "WebSocket: " + webSocketUrl : "UDP pose: 14582") + "\nCoordinate: Gazebo ENU -> Unity"
                 : "ROS UDP: " + (bridge && bridge.enabledBridge ? bridge.lastPacket : "off, use --ros-udp to enable");
 
             GUI.Label(
-                new Rect(30, 60, 330, 84),
+                new Rect(30, panelY + 44, 330, 84),
                 status + "\n" +
                 controls +
                 "Default view: chase camera behind the boat\n" +
@@ -526,6 +880,46 @@ namespace UavUsv
         private void Update()
         {
             transform.Rotate(Vector3.up, 18f * Time.deltaTime, Space.World);
+        }
+    }
+
+    public sealed class CrossingBarrierMotion : MonoBehaviour
+    {
+        public float amplitude = 14f;
+        public float passDuration = 8f;
+        public int maxPasses = 2;
+        private Vector3 start;
+        private float startedAt;
+        private bool parked;
+
+        private void Start()
+        {
+            start = transform.position;
+            startedAt = Time.time;
+        }
+
+        private void Update()
+        {
+            if (parked)
+                return;
+
+            float elapsed = Time.time - startedAt;
+            float total = Mathf.Max(.5f, passDuration) * Mathf.Max(1, maxPasses);
+            if (elapsed >= total)
+            {
+                transform.position = start;
+                parked = true;
+                enabled = false;
+                return;
+            }
+
+            float local = elapsed % Mathf.Max(.5f, passDuration);
+            float u = Mathf.Clamp01(local / Mathf.Max(.5f, passDuration));
+            int pass = Mathf.FloorToInt(elapsed / Mathf.Max(.5f, passDuration));
+            bool reverse = (pass % 2) == 1;
+            Vector3 a = start + new Vector3(-amplitude, 0f, 0f);
+            Vector3 b = start + new Vector3(amplitude, 0f, amplitude * .35f);
+            transform.position = Vector3.Lerp(reverse ? b : a, reverse ? a : b, u);
         }
     }
 }

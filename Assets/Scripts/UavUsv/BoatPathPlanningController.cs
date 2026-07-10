@@ -11,13 +11,14 @@ namespace UavUsv
         public Transform buoySouth;
         public Transform buoyEast;
         public Transform targetVessel;
+        public Transform coastlineCollisionRoot;
         public ExternalPoseWebSocketClient webSocket;
 
         [Header("A* Grid")]
-        public float worldMinX = -88f;
-        public float worldMinY = -88f;
-        public float worldMaxX = 88f;
-        public float worldMaxY = 88f;
+        public float worldMinX = -180f;
+        public float worldMinY = -180f;
+        public float worldMaxX = 180f;
+        public float worldMaxY = 180f;
         public float cellSize = 2f;
         public float safetyMargin = 2.5f;
 
@@ -34,6 +35,7 @@ namespace UavUsv
         private float guiScale = 1f;
         private int expandedNodes;
         private long activePathId;
+        private Collider[] coastlineColliders;
 
         private void Awake()
         {
@@ -95,8 +97,15 @@ namespace UavUsv
             var start = new Vector2(startEnu.x, startEnu.y);
             var goal = new Vector2(goalEnu.x, goalEnu.y);
             List<GridAStarPlanner.CircularObstacle> obstacles = CollectObstacles();
+            Physics.SyncTransforms();
 
-            if (!planner.TryPlan(start, goal, obstacles, out List<Vector2> path, out expandedNodes))
+            if (!planner.TryPlan(
+                    start,
+                    goal,
+                    obstacles,
+                    IsCoastBlocked,
+                    out List<Vector2> path,
+                    out expandedNodes))
             {
                 plannedPath.Clear();
                 RenderPath();
@@ -110,6 +119,32 @@ namespace UavUsv
             goalMarker.position = Coordinates.ToUnity(goal.x, goal.y, .35f);
             goalMarker.gameObject.SetActive(true);
             status = $"A* ready: {plannedPath.Count} waypoints";
+        }
+
+        public void SetCoastlineCollisionRoot(Transform root)
+        {
+            coastlineCollisionRoot = root;
+            coastlineColliders = root
+                ? root.GetComponentsInChildren<Collider>(true)
+                : null;
+        }
+
+        private bool IsCoastBlocked(Vector2 enu)
+        {
+            if (coastlineColliders == null || coastlineColliders.Length == 0)
+                return false;
+
+            Ray ray = new Ray(
+                Coordinates.ToUnity(enu.x, enu.y, 80f),
+                Vector3.down
+            );
+            for (int i = 0; i < coastlineColliders.Length; i++)
+            {
+                Collider coast = coastlineColliders[i];
+                if (coast && coast.Raycast(ray, out _, 160f))
+                    return true;
+            }
+            return false;
         }
 
         private List<GridAStarPlanner.CircularObstacle> CollectObstacles()
