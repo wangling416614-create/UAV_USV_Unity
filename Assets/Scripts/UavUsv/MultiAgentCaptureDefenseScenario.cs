@@ -49,6 +49,15 @@ namespace UavUsv
         public float missionTimeLimitSeconds = 85f;
         public bool showDebugOverlays = true;
 
+        [Header("Motion stability")]
+        public float surfaceMaxTurnRate = 48f;
+        public float surfaceAcceleration = 5f;
+        public float surfaceTurnSlowdownAngle = 70f;
+        public float airMaxTurnRate = 90f;
+        public float airAcceleration = 9f;
+        public float peerCorrectionSpeed = 2.5f;
+        public float detourCommitSeconds = 3f;
+
         private readonly List<LineRenderer> commandLinks = new List<LineRenderer>();
         private readonly List<LineRenderer> sensorRings = new List<LineRenderer>();
         private readonly List<LineRenderer> tracks = new List<LineRenderer>();
@@ -61,6 +70,8 @@ namespace UavUsv
         private Vector3 targetCenterEnu = new Vector3(40f, -20f, 0f);
         private Vector3 targetVelocityEnu;
         private Vector3 barrierStartPosition;
+        private Vector3 barrierOriginPosition;
+        private bool barrierOriginInitialized;
         private Collider[] coastlineColliders;
         private float scenarioStarted;
         private float captureStarted = -1f;
@@ -77,6 +88,10 @@ namespace UavUsv
         private Vector3 lockedTargetPosition;
         private Vector3[] boatDetours;
         private float[] boatDetourUntil;
+        private readonly Dictionary<Transform, float> surfaceSpeedState =
+            new Dictionary<Transform, float>();
+        private readonly Dictionary<Transform, Vector3> airVelocityState =
+            new Dictionary<Transform, Vector3>();
 
         // Equilateral triangle on capture ring / defense ring (120° spacing, drones offset by 60°).
         private static readonly float[] BoatApproachAngles = { 0f, 120f, 240f };
@@ -138,8 +153,20 @@ namespace UavUsv
             activeAvoidanceCount = 0;
             detectReporter = "-";
             ClearDetours();
+
+            surfaceSpeedState.Clear();
+            airVelocityState.Clear();
             if (dynamicBarrier)
-                barrierStartPosition = dynamicBarrier.position;
+            {
+                if (!barrierOriginInitialized)
+                {
+                    barrierOriginPosition = dynamicBarrier.position;
+                    barrierOriginInitialized = true;
+                }
+                barrierStartPosition = barrierOriginPosition;
+                // Put the obstacle on its path before the first rendered frame.
+                dynamicBarrier.position = barrierStartPosition + new Vector3(-8f, 0f, 0f);
+            }
             phase = "UAVs on pad — USVs searching";
             SetTargetPose(Coordinates.ToUnity(targetCenterEnu.x, targetCenterEnu.y, .38f));
 
@@ -567,15 +594,28 @@ namespace UavUsv
             {
                 if (!boats[i])
                     continue;
-                boats[i].position = FixedBoatSlot(i, center);
-                FaceToward(boats[i], center);
+                Vector3 slot = FixedBoatSlot(i, center);
+                if (HorizontalDistance(boats[i].position, slot) > .2f)
+                    MoveSurfaceAgent(boats[i], slot, boatSpeed * .45f);
+                else
+                {
+                    BrakeSurfaceAgent(boats[i]);
+                    RotateSurfaceToward(boats[i], center);
+                }
             }
 
             for (int i = 0; drones != null && i < drones.Length; i++)
             {
                 if (!drones[i])
                     continue;
-                drones[i].position = FixedDroneSlot(i, center);
+                Vector3 slot = FixedDroneSlot(i, center);
+                if (Vector3.Distance(drones[i].position, slot) > .25f)
+                    MoveAirAgent(drones[i], slot, droneSpeed * .45f);
+                else
+                {
+                    BrakeAirAgent(drones[i]);
+                    RotateAirToward(drones[i], center);
+                }
                 if (droneVisuals != null && i < droneVisuals.Length && droneVisuals[i])
                     droneVisuals[i].spinning = true;
             }
@@ -709,10 +749,14 @@ namespace UavUsv
                 // Follow the shrinking ring so the triangle forms over time.
                 Vector3 slot = BoatRingSlot(i, center, ring);
                 float toSlot = HorizontalDistance(boat.position, slot);
+                maxDistance = Mathf.Max(
+                    maxDistance,
+                    HorizontalDistance(boat.position, FixedBoatSlot(i, center))
+                );
                 if (BoatRingFullyClosed() && toSlot <= holdDistance)
                 {
-                    boat.position = FixedBoatSlot(i, center);
-                    FaceToward(boat, center);
+                    BrakeSurfaceAgent(boat);
+                    RotateSurfaceToward(boat, center);
                     continue;
                 }
 
@@ -721,7 +765,6 @@ namespace UavUsv
                 slot = ClampToWater(slot, .42f);
                 MoveSurfaceAgent(boat, slot, boatSpeed);
                 TrackBoatProgress(boat, i, slot);
-                maxDistance = Mathf.Max(maxDistance, HorizontalDistance(boat.position, FixedBoatSlot(i, center)));
             }
 
             EnforcePeerClearance(boats, agentSeparation * .9f, true);
@@ -778,22 +821,28 @@ namespace UavUsv
                     }
 
                     drone.position = next;
+                    if ((next - pos).sqrMagnitude > .0001f)
+                        RotateAirToward(drone, next + (next - pos));
                     maxDistance = Mathf.Max(maxDistance, Vector3.Distance(drone.position, FixedDroneSlot(i, center)));
                     continue;
                 }
 
                 Vector3 goal = FixedDroneSlot(i, center);
                 float toSlot = Vector3.Distance(drone.position, goal);
+                maxDistance = Mathf.Max(
+                    maxDistance,
+                    Vector3.Distance(drone.position, FixedDroneSlot(i, center))
+                );
                 if (toSlot <= holdDistance)
                 {
-                    drone.position = goal;
+                    BrakeAirAgent(drone);
+                    RotateAirToward(drone, center);
                     continue;
                 }
 
                 goal = SoftAvoidPeers(drone, goal, drones, droneSeparation);
                 goal.y = cruiseAlt;
                 MoveAirAgent(drone, goal, droneSpeed);
-                maxDistance = Mathf.Max(maxDistance, Vector3.Distance(drone.position, FixedDroneSlot(i, center)));
             }
 
             dronesTakingOff = climbing > 0;
@@ -834,7 +883,7 @@ namespace UavUsv
             float scoreB = Vector3.Dot((detourB - boat.position).normalized, toGoal.normalized);
             Vector3 chosen = scoreA >= scoreB ? detourA : detourB;
             boatDetours[index] = chosen;
-            boatDetourUntil[index] = Time.time + 1.2f;
+            boatDetourUntil[index] = Time.time + Mathf.Max(1.2f, detourCommitSeconds);
             activeAvoidanceCount++;
             return chosen;
         }
@@ -1177,7 +1226,7 @@ namespace UavUsv
             if (agents == null)
                 return;
 
-            for (int pass = 0; pass < 3; pass++)
+            for (int pass = 0; pass < 2; pass++)
             {
                 for (int i = 0; i < agents.Length; i++)
                 {
@@ -1197,17 +1246,36 @@ namespace UavUsv
                         if (dist >= minDistance)
                             continue;
 
-                        Vector3 mid = (pa + pb) * .5f;
-                        float push = (minDistance - Mathf.Max(dist, .05f)) * .55f + .4f;
-                        Vector3 awayA = PushAway(pa, mid, HorizontalDistance(pa, mid) + push);
-                        Vector3 awayB = PushAway(pb, mid, HorizontalDistance(pb, mid) + push);
+                        Vector3 separation = pa - pb;
+                        separation.y = 0f;
+                        if (separation.sqrMagnitude < .001f)
+                        {
+                            float angle = (i * 97f + j * 53f) * Mathf.Deg2Rad;
+                            separation = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+                        }
+                        else
+                        {
+                            separation.Normalize();
+                        }
+
+                        float overlap = minDistance - Mathf.Max(dist, .05f);
+                        float correction = Mathf.Min(
+                            overlap * .5f,
+                            Mathf.Max(.1f, peerCorrectionSpeed) * Time.deltaTime
+                        );
+                        Vector3 awayA = pa + separation * correction;
+                        Vector3 awayB = pb - separation * correction;
                         awayA.y = pa.y;
                         awayB.y = pb.y;
 
                         if (clampWater)
                         {
-                            a.position = ClampToWater(awayA, pa.y);
-                            b.position = ClampToWater(awayB, pb.y);
+                            Vector3 enuA = Coordinates.ToEnu(awayA);
+                            Vector3 enuB = Coordinates.ToEnu(awayB);
+                            if (!IsLand(new Vector2(enuA.x, enuA.y)))
+                                a.position = awayA;
+                            if (!IsLand(new Vector2(enuB.x, enuB.y)))
+                                b.position = awayB;
                         }
                         else
                         {
@@ -1383,30 +1451,100 @@ namespace UavUsv
             destination = SoftAvoidPeers(agent, destination, boats, agentSeparation * .85f);
             destination = ClampToWater(destination, .42f);
 
-            Vector3 before = agent.position;
-            float distance = Vector3.Distance(agent.position, destination);
-            if (distance > .4f)
+            Vector3 toDestination = destination - agent.position;
+            toDestination.y = 0f;
+            float distance = toDestination.magnitude;
+            float currentSpeed = surfaceSpeedState.TryGetValue(agent, out float storedSpeed)
+                ? storedSpeed
+                : 0f;
+            if (distance > .15f)
             {
-                float factor = fullSpeed ? 1f : Mathf.Max(.5f, Mathf.Clamp01(distance / 12f));
-                Vector3 next = Vector3.MoveTowards(
-                    agent.position,
-                    destination,
-                    speed * factor * Time.deltaTime
+                Vector3 desiredDirection = toDestination / distance;
+                Quaternion desiredRotation =
+                    Quaternion.LookRotation(desiredDirection, Vector3.up) *
+                    Quaternion.Euler(0f, -90f, 0f);
+                float turnError = Quaternion.Angle(agent.rotation, desiredRotation);
+                agent.rotation = Quaternion.RotateTowards(
+                    agent.rotation,
+                    desiredRotation,
+                    Mathf.Max(1f, surfaceMaxTurnRate) * Time.deltaTime
                 );
-                agent.position = ClampToWater(next, .42f);
-            }
 
-            Vector3 velocity = agent.position - before;
-            velocity.y = 0f;
-            if (velocity.sqrMagnitude > .0001f)
-            {
-                Quaternion facing = Quaternion.LookRotation(velocity.normalized, Vector3.up) * Quaternion.Euler(0f, -90f, 0f);
-                agent.rotation = Quaternion.RotateTowards(agent.rotation, facing, 140f * Time.deltaTime);
+                float factor = fullSpeed ? 1f : Mathf.Max(.5f, Mathf.Clamp01(distance / 12f));
+                float turnScale = Mathf.Lerp(
+                    1f,
+                    .16f,
+                    Mathf.Clamp01(turnError / Mathf.Max(10f, surfaceTurnSlowdownAngle))
+                );
+                float desiredSpeed = speed * factor * turnScale;
+                currentSpeed = Mathf.MoveTowards(
+                    currentSpeed,
+                    desiredSpeed,
+                    Mathf.Max(.1f, surfaceAcceleration) * Time.deltaTime
+                );
+
+                Vector3 forward = agent.right;
+                forward.y = 0f;
+                if (forward.sqrMagnitude > .001f)
+                    forward.Normalize();
+                float step = Mathf.Min(currentSpeed * Time.deltaTime, distance);
+                Vector3 next = agent.position + forward * step;
+                next.y = .42f;
+                Vector3 nextEnu = Coordinates.ToEnu(next);
+                if (!IsLand(new Vector2(nextEnu.x, nextEnu.y)))
+                    agent.position = next;
+                else
+                    currentSpeed = 0f;
             }
-            else if (targetPoint)
+            else
             {
-                FaceToward(agent, targetPoint.position);
+                currentSpeed = Mathf.MoveTowards(
+                    currentSpeed,
+                    0f,
+                    Mathf.Max(.1f, surfaceAcceleration) * Time.deltaTime
+                );
             }
+            surfaceSpeedState[agent] = currentSpeed;
+        }
+
+        private void BrakeSurfaceAgent(Transform agent)
+        {
+            float current = surfaceSpeedState.TryGetValue(agent, out float stored) ? stored : 0f;
+            float nextSpeed = Mathf.MoveTowards(
+                current,
+                0f,
+                Mathf.Max(.1f, surfaceAcceleration) * Time.deltaTime
+            );
+            Vector3 forward = agent.right;
+            forward.y = 0f;
+            if (forward.sqrMagnitude > .001f && nextSpeed > .01f)
+            {
+                forward.Normalize();
+                Vector3 next = agent.position + forward * nextSpeed * Time.deltaTime;
+                next.y = .42f;
+                Vector3 nextEnu = Coordinates.ToEnu(next);
+                if (!IsLand(new Vector2(nextEnu.x, nextEnu.y)))
+                    agent.position = next;
+                else
+                    nextSpeed = 0f;
+            }
+            surfaceSpeedState[agent] = nextSpeed;
+        }
+
+        private void RotateSurfaceToward(Transform agent, Vector3 point)
+        {
+            Vector3 direction = point - agent.position;
+            direction.y = 0f;
+            if (direction.sqrMagnitude < .001f)
+                return;
+            Quaternion facing =
+                Quaternion.LookRotation(direction.normalized, Vector3.up) *
+                Quaternion.Euler(0f, -90f, 0f);
+            agent.rotation = Quaternion.RotateTowards(
+                agent.rotation,
+                facing,
+                Mathf.Max(1f, surfaceMaxTurnRate) * Time.deltaTime
+            );
         }
 
         private bool IsLand(Vector2 enu)
@@ -1475,19 +1613,67 @@ namespace UavUsv
         private void MoveAirAgent(Transform agent, Vector3 destination, float speed, bool fullSpeed = false)
         {
             destination = SoftAvoidPeers(agent, destination, drones, droneSeparation * .85f);
-            Vector3 before = agent.position;
-            float distance = Vector3.Distance(agent.position, destination);
-            if (distance > .5f)
+            Vector3 toDestination = destination - agent.position;
+            float distance = toDestination.magnitude;
+            Vector3 velocity = airVelocityState.TryGetValue(agent, out Vector3 storedVelocity)
+                ? storedVelocity
+                : Vector3.zero;
+            if (distance > .15f)
             {
                 float factor = fullSpeed ? 1f : Mathf.Max(.45f, Mathf.Clamp01(distance / 10f));
-                Vector3 next = Vector3.MoveTowards(agent.position, destination, speed * factor * Time.deltaTime);
-                next.y = destination.y;
-                agent.position = next;
+                Vector3 desiredVelocity = toDestination.normalized * speed * factor;
+                velocity = Vector3.MoveTowards(
+                    velocity,
+                    desiredVelocity,
+                    Mathf.Max(.1f, airAcceleration) * Time.deltaTime
+                );
+                Vector3 step = velocity * Time.deltaTime;
+                if (step.magnitude > distance)
+                    step = toDestination;
+                agent.position += step;
             }
-            Vector3 velocity = agent.position - before;
-            velocity.y = 0f;
-            if (velocity.sqrMagnitude > .0001f)
-                agent.rotation = Quaternion.Slerp(agent.rotation, Quaternion.LookRotation(velocity.normalized, Vector3.up), 6f * Time.deltaTime);
+            else
+            {
+                velocity = Vector3.MoveTowards(
+                    velocity,
+                    Vector3.zero,
+                    Mathf.Max(.1f, airAcceleration) * Time.deltaTime
+                );
+            }
+
+            airVelocityState[agent] = velocity;
+            Vector3 horizontalVelocity = velocity;
+            horizontalVelocity.y = 0f;
+            if (horizontalVelocity.sqrMagnitude > .001f)
+                RotateAirToward(agent, agent.position + horizontalVelocity);
+        }
+
+        private void BrakeAirAgent(Transform agent)
+        {
+            Vector3 velocity = airVelocityState.TryGetValue(agent, out Vector3 stored)
+                ? stored
+                : Vector3.zero;
+            Vector3 nextVelocity = Vector3.MoveTowards(
+                velocity,
+                Vector3.zero,
+                Mathf.Max(.1f, airAcceleration) * Time.deltaTime
+            );
+            agent.position += nextVelocity * Time.deltaTime;
+            airVelocityState[agent] = nextVelocity;
+        }
+
+        private void RotateAirToward(Transform agent, Vector3 point)
+        {
+            Vector3 direction = point - agent.position;
+            direction.y = 0f;
+            if (direction.sqrMagnitude < .001f)
+                return;
+            Quaternion facing = Quaternion.LookRotation(direction.normalized, Vector3.up);
+            agent.rotation = Quaternion.RotateTowards(
+                agent.rotation,
+                facing,
+                Mathf.Max(1f, airMaxTurnRate) * Time.deltaTime
+            );
         }
 
         private void AnimateBarrier()
@@ -1498,7 +1684,7 @@ namespace UavUsv
             float missionTime = Time.time - scenarioStarted - dispatchDelaySeconds;
             if (missionTime < 0f)
             {
-                dynamicBarrier.position = barrierStartPosition;
+                dynamicBarrier.position = barrierStartPosition + new Vector3(-8f, 0f, 0f);
                 return;
             }
 

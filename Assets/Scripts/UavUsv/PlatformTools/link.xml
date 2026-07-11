@@ -1,0 +1,6 @@
+<linker>
+  <assembly fullname="Assembly-CSharp">
+    <type fullname="UavUsv.PlatformTools.WebCommandBridge" preserve="all" />
+    <type fullname="UavUsv.PlatformTools.WebDeviceObserverCamera" preserve="all" />
+  </assembly>
+</linker>

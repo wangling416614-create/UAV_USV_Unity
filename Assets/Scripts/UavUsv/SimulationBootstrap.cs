@@ -204,7 +204,14 @@ namespace UavUsv
                 }
             }
 
-            BuildCamera(boat, drone, targetPoint ? targetPoint : lighthouse);
+            BuildCamera(
+                boat,
+                drone,
+                targetPoint ? targetPoint : lighthouse,
+                boats,
+                drones,
+                targetVessel
+            );
             lighthouse.gameObject.AddComponent<BeaconSweep>();
 
             PlatformHeartbeat heartbeat = gameObject.AddComponent<PlatformHeartbeat>();
@@ -797,12 +804,18 @@ namespace UavUsv
             instance.position += targetWorldPosition - bounds.center;
         }
 
-        private void BuildCamera(Transform target, Transform companion, Transform lighthouse)
+        private void BuildCamera(
+            Transform target,
+            Transform companion,
+            Transform lighthouse,
+            IReadOnlyList<Transform> boats,
+            IReadOnlyList<Transform> drones,
+            Transform targetVessel)
         {
             GameObject go = new GameObject("Main Camera") { tag = "MainCamera" };
 
             Camera camera = go.AddComponent<Camera>();
-            camera.fieldOfView = 58f;
+            camera.fieldOfView = 52f;
             camera.nearClipPlane = .1f;
             camera.farClipPlane = 900f;
             camera.allowHDR = true;
@@ -822,6 +835,27 @@ namespace UavUsv
             chase.lookHeight = 1.6f;
             chase.lighthouseInfluence = .1f;
             chase.useTargetRightAsForward = true;
+
+            var cameraTargets = new List<Transform>();
+            if (boats != null)
+            {
+                for (int i = 0; i < boats.Count; i++)
+                {
+                    if (boats[i])
+                        cameraTargets.Add(boats[i]);
+                }
+            }
+            if (drones != null)
+            {
+                for (int i = 0; i < drones.Count; i++)
+                {
+                    if (drones[i])
+                        cameraTargets.Add(drones[i]);
+                }
+            }
+            if (targetVessel)
+                cameraTargets.Add(targetVessel);
+            chase.SetGroupTargets(cameraTargets.ToArray());
         }
 
         private void OnGUI()
@@ -868,7 +902,7 @@ namespace UavUsv
                 new Rect(30, panelY + 44, 330, 84),
                 status + "\n" +
                 controls +
-                "Default view: chase camera behind the boat\n" +
+                "Default view: readable action + tactical overview\n" +
                 bridgeText,
                 bodyStyle
             );
@@ -889,12 +923,18 @@ namespace UavUsv
         public float passDuration = 8f;
         public int maxPasses = 2;
         private Vector3 start;
+        private Vector3 pointA;
+        private Vector3 pointB;
         private float startedAt;
         private bool parked;
 
         private void Start()
         {
             start = transform.position;
+            pointA = start + new Vector3(-amplitude, 0f, 0f);
+            pointB = start + new Vector3(amplitude, 0f, amplitude * .35f);
+            // Initialize on the path before the first rendered frame.
+            transform.position = pointA;
             startedAt = Time.time;
         }
 
@@ -907,7 +947,9 @@ namespace UavUsv
             float total = Mathf.Max(.5f, passDuration) * Mathf.Max(1, maxPasses);
             if (elapsed >= total)
             {
-                transform.position = start;
+                transform.position = (Mathf.Max(1, maxPasses) % 2) == 1
+                    ? pointB
+                    : pointA;
                 parked = true;
                 enabled = false;
                 return;
@@ -917,9 +959,11 @@ namespace UavUsv
             float u = Mathf.Clamp01(local / Mathf.Max(.5f, passDuration));
             int pass = Mathf.FloorToInt(elapsed / Mathf.Max(.5f, passDuration));
             bool reverse = (pass % 2) == 1;
-            Vector3 a = start + new Vector3(-amplitude, 0f, 0f);
-            Vector3 b = start + new Vector3(amplitude, 0f, amplitude * .35f);
-            transform.position = Vector3.Lerp(reverse ? b : a, reverse ? a : b, u);
+            transform.position = Vector3.Lerp(
+                reverse ? pointB : pointA,
+                reverse ? pointA : pointB,
+                u
+            );
         }
     }
 }
