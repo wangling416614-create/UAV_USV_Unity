@@ -122,7 +122,7 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
---- !u!1 &675270206
+--- !u!1 &511912786
 GameObject:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -130,8 +130,8 @@ GameObject:
   m_PrefabAsset: {fileID: 0}
   serializedVersion: 6
   m_Component:
-  - component: {fileID: 675270208}
-  - component: {fileID: 675270207}
+  - component: {fileID: 511912788}
+  - component: {fileID: 511912787}
   m_Layer: 0
   m_Name: UAV-USV Simulation
   m_TagString: Untagged
@@ -139,31 +139,32 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!114 &675270207
+--- !u!114 &511912787
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 675270206}
+  m_GameObject: {fileID: 511912786}
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: faec3bd73b506a746b9b0bb2f0147e5b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  useExternalPoseInEditor: 1
+  useExternalPoseInEditor: 0
   useWebSocketPose: 1
   webSocketUrl: ws://127.0.0.1:8765/uav_usv
   platformUrl: http://127.0.0.1:8081/api/integration/heartbeat
   platformToken: uav-usv-local-agent
   playMissionInEditor: 0
---- !u!4 &675270208
+  runLocalMultiAgentScenarioInEditor: 1
+--- !u!4 &511912788
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 675270206}
+  m_GameObject: {fileID: 511912786}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
@@ -176,4 +177,4 @@ Transform:
 SceneRoots:
   m_ObjectHideFlags: 0
   m_Roots:
-  - {fileID: 675270208}
+  - {fileID: 511912788}

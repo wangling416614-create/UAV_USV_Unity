@@ -52,6 +52,7 @@ namespace UavUsv.PlatformTools
         }
 
         private WebDeviceObserverCamera observer;
+        private WebVehicleCommandController vehicleController;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -63,11 +64,16 @@ namespace UavUsv.PlatformTools
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
             GameObject existing = GameObject.Find("WebCommandBridge");
-            if (existing && existing.GetComponent<WebCommandBridge>())
-                return;
             GameObject host = existing ? existing : new GameObject("WebCommandBridge");
             DontDestroyOnLoad(host);
-            host.AddComponent<WebCommandBridge>();
+            WebCommandBridge bridge = host.GetComponent<WebCommandBridge>();
+            if (!bridge) bridge = host.AddComponent<WebCommandBridge>();
+            WebVehicleCommandController controller = host.GetComponent<WebVehicleCommandController>();
+            if (!controller) controller = host.AddComponent<WebVehicleCommandController>();
+            WebTrajectoryTelemetryBridge telemetry = host.GetComponent<WebTrajectoryTelemetryBridge>();
+            if (!telemetry) telemetry = host.AddComponent<WebTrajectoryTelemetryBridge>();
+            telemetry.Initialize(controller);
+            bridge.vehicleController = controller;
 #endif
         }
 
@@ -117,7 +123,7 @@ namespace UavUsv.PlatformTools
                     SwitchCamera(message.requestId, payload.mode);
                     break;
                 case "sendcontrolcommand":
-                    PostCommandUnsupported(message.requestId, payload.deviceCode, payload.command);
+                    ExecuteVehicleCommand(message.requestId, payload.deviceCode, payload.command);
                     break;
             }
         }
@@ -137,6 +143,19 @@ namespace UavUsv.PlatformTools
                 observer = camera.gameObject.AddComponent<WebDeviceObserverCamera>();
             observer.Initialize(camera, chase);
             return true;
+        }
+
+        private bool EnsureVehicleController()
+        {
+            if (!vehicleController)
+                vehicleController = GetComponent<WebVehicleCommandController>();
+            if (!vehicleController)
+                vehicleController = gameObject.AddComponent<WebVehicleCommandController>();
+            WebTrajectoryTelemetryBridge telemetry = GetComponent<WebTrajectoryTelemetryBridge>();
+            if (!telemetry)
+                telemetry = gameObject.AddComponent<WebTrajectoryTelemetryBridge>();
+            telemetry.Initialize(vehicleController);
+            return vehicleController && vehicleController.EnsureScenario();
         }
 
         private void SelectDevice(string requestId, string requestedCode)
@@ -245,8 +264,12 @@ namespace UavUsv.PlatformTools
             Emit(JsonUtility.ToJson(response));
         }
 
-        private void PostCommandUnsupported(string requestId, string deviceCode, string command)
+        private void ExecuteVehicleCommand(string requestId, string deviceCode, string command)
         {
+            string state = "ERROR";
+            string detail = "Unity vehicle controller is not ready";
+            bool success = EnsureVehicleController() &&
+                vehicleController.TryExecute(command, deviceCode, out state, out detail);
             var response = new ResponseEnvelope
             {
                 type = "commandAck",
@@ -254,11 +277,11 @@ namespace UavUsv.PlatformTools
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 payload = new ResponsePayload
                 {
-                    success = false,
+                    success = success,
                     deviceCode = deviceCode ?? string.Empty,
                     mode = observer ? observer.CurrentModeName : string.Empty,
                     profile = observer ? observer.CurrentProfileName : string.Empty,
-                    status = "Camera bridge does not execute equipment command: " + (command ?? string.Empty)
+                    status = success ? state + ": " + detail : detail
                 }
             };
             Emit(JsonUtility.ToJson(response));

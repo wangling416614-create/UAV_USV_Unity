@@ -2,5 +2,7 @@
   <assembly fullname="Assembly-CSharp">
     <type fullname="UavUsv.PlatformTools.WebCommandBridge" preserve="all" />
     <type fullname="UavUsv.PlatformTools.WebDeviceObserverCamera" preserve="all" />
+    <type fullname="UavUsv.PlatformTools.WebVehicleCommandController" preserve="all" />
+    <type fullname="UavUsv.PlatformTools.WebTrajectoryTelemetryBridge" preserve="all" />
   </assembly>
 </linker>
