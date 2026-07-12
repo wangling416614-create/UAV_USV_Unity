@@ -753,8 +753,9 @@ PlayerSettings:
   hmiPlayerDataPath: 
   hmiForceSRGBBlit: 0
   embeddedLinuxEnableGamepadInput: 0
+  hmiCpuConfiguration: 
   hmiLogStartupTiming: 0
-  hmiCpuConfiguration:
+  qnxGraphicConfPath: 
   apiCompatibilityLevel: 6
   activeInputHandler: 0
   windowsGamepadBackendHint: 0
