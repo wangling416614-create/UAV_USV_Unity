@@ -19,6 +19,7 @@ namespace UavUsv.PlatformTools
             public OverrideMode mode;
             public Vector3 target;
             public string state;
+            public Vector3? finalTarget;
         }
 
         private readonly Dictionary<Transform, VehicleOverride> overrides =
@@ -81,7 +82,10 @@ namespace UavUsv.PlatformTools
                 case "uavland":
                 case "uavemergencyland":
                     if (!isUav) return Reject("UAV command sent to USV", out state, out detail);
-                    SetOverride(subject, OverrideMode.Land, DroneHome(index), "LANDING");
+                    Vector3 landingPad = DroneHome(index);
+                    Vector3 landingApproach = landingPad;
+                    landingApproach.y = Mathf.Max(scenario.droneAltitude, subject.position.y);
+                    SetOverride(subject, OverrideMode.Land, landingApproach, "LANDING", landingPad);
                     state = "LANDING";
                     break;
                 case "usvdepart":
@@ -189,8 +193,11 @@ namespace UavUsv.PlatformTools
                     continue;
                 }
 
+                bool droneSubject = subject.name.IndexOf("UAV", StringComparison.OrdinalIgnoreCase) >= 0;
                 float speed = item.mode == OverrideMode.Land
-                    ? Mathf.Max(1.5f, scenario.droneTakeoffClimbSpeed)
+                    ? (droneSubject && item.finalTarget.HasValue && Mathf.Abs(item.target.y - item.finalTarget.Value.y) > .25f
+                        ? Mathf.Max(4f, scenario.droneSpeed)
+                        : Mathf.Max(1.5f, scenario.droneTakeoffClimbSpeed))
                     : (subject.name.IndexOf("UAV", StringComparison.OrdinalIgnoreCase) >= 0
                         ? scenario.droneSpeed
                         : scenario.boatSpeed);
@@ -206,9 +213,17 @@ namespace UavUsv.PlatformTools
                 }
                 else if (item.mode == OverrideMode.Land)
                 {
-                    item.mode = OverrideMode.Hold;
-                    item.state = "GROUNDED";
-                    item.target = subject.position;
+                    if (item.finalTarget.HasValue && (item.target - item.finalTarget.Value).sqrMagnitude > .04f)
+                    {
+                        item.target = item.finalTarget.Value;
+                    }
+                    else
+                    {
+                        item.mode = OverrideMode.Hold;
+                        item.state = "GROUNDED";
+                        item.target = subject.position;
+                        item.finalTarget = null;
+                    }
                 }
                 else if (item.mode == OverrideMode.Return)
                 {
@@ -219,9 +234,15 @@ namespace UavUsv.PlatformTools
             }
         }
 
-        private void SetOverride(Transform subject, OverrideMode mode, Vector3 target, string state)
+        private void SetOverride(Transform subject, OverrideMode mode, Vector3 target, string state, Vector3? finalTarget = null)
         {
-            overrides[subject] = new VehicleOverride { mode = mode, target = target, state = state };
+            overrides[subject] = new VehicleOverride
+            {
+                mode = mode,
+                target = target,
+                state = state,
+                finalTarget = finalTarget
+            };
         }
 
         private bool TryResolve(string rawCode, out Transform subject, out bool isUav, out int index)

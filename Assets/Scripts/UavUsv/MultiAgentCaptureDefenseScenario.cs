@@ -1849,6 +1849,9 @@ namespace UavUsv
 
         private void OnGUI()
         {
+            if (Application.platform == RuntimePlatform.WebGLPlayer)
+                return;
+
             titleStyle ??= new GUIStyle(GUI.skin.label)
             {
                 fontSize = 20,

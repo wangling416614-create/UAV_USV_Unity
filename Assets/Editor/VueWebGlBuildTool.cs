@@ -23,7 +23,7 @@ namespace UavUsv.Editor.Tools
             UavUsv.Editor.ProjectBuilder.CreateScene();
             string requestedOutput = Environment.GetEnvironmentVariable("UAV_USV_WEBGL_OUTPUT");
             string outputPath = Path.GetFullPath(string.IsNullOrWhiteSpace(requestedOutput)
-                ? @"F:\UAV_USV_Platform\frontend\public\unity"
+                ? @"F:\UVA_USV\UAV_USV_Platform\frontend\public\unity"
                 : requestedOutput);
             string integrationIndexPath = Path.Combine(outputPath, "index.html");
             string integrationIndex = File.Exists(integrationIndexPath)
