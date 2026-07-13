@@ -132,24 +132,54 @@ namespace UavUsv.PlatformTools
             switch (command)
             {
                 case "missionstart":
+                    // 清除编组部署阶段留下的起飞、悬停和定点保持覆盖，
+                    // 将载具控制权交还给正式任务场景。
+                    overrides.Clear();
+
                     scenario.automatic = true;
+
+                    if (scenario.baseController)
+                        scenario.baseController.automatic = true;
+
                     scenario.NotifyBaseDispatch();
-                    detail = "Mission dispatch started";
+
+                    state = "RUNNING";
+                    detail = "Mission dispatch started; deployment overrides cleared";
                     return true;
+
                 case "missionpause":
                     scenario.automatic = false;
+
+                    if (scenario.baseController)
+                        scenario.baseController.automatic = false;
+
                     state = "PAUSED";
                     detail = "Mission simulation paused";
                     return true;
+
                 case "missionresume":
+                    // 清除暂停阶段的悬停和定点保持覆盖。
+                    overrides.Clear();
+
                     scenario.automatic = true;
-                    detail = "Mission simulation resumed";
+
+                    if (scenario.baseController)
+                        scenario.baseController.automatic = true;
+
+                    state = "RUNNING";
+                    detail = "Mission simulation resumed; hold overrides cleared";
                     return true;
+
                 case "missionreturn":
                     scenario.automatic = false;
+
+                    if (scenario.baseController)
+                        scenario.baseController.automatic = false;
+
                     state = "RETURNING";
-                    detail = "Mission return delegated to vehicle commands";
+                    detail = "Mission automation stopped; return delegated to vehicle commands";
                     return true;
+
                 case "missioncomplete":
                     scenario.automatic = false;
                     state = "COMPLETED";
@@ -158,6 +188,10 @@ namespace UavUsv.PlatformTools
                 case "missionfail":
                 case "missioncancel":
                     scenario.automatic = false;
+
+                    if (scenario.baseController)
+                        scenario.baseController.automatic = false;
+
                     state = command == "missionfail" ? "FAILED" : "CANCELLED";
                     detail = "Mission stopped by platform command";
                     return true;

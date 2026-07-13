@@ -24,7 +24,7 @@ namespace UavUsv
         public bool playMissionInEditor = false;
 
         [Tooltip("Run the local 3 USV + 3 UAV + 1 target capture-defense scenario when ROS sync is not active.")]
-        public bool runLocalMultiAgentScenarioInEditor = true;
+        public bool runLocalMultiAgentScenarioInEditor = false;
 
         private CooperativeMission mission;
         private RosUdpBridge bridge;
@@ -169,7 +169,7 @@ namespace UavUsv
                 scenario.droneSensors = droneSensors.ToArray();
                 scenario.searchStartRadius = 72f;
                 scenario.SetCoastlineCollisionRoot(coastline ? coastline.collisionRoot : null);
-                scenario.automatic = !Application.isEditor || runLocalMultiAgentScenarioInEditor || playMissionInEditor;
+                scenario.automatic = false;
                 scenario.enabled = !legacyDeckDemo;
                 multiAgentScenario = scenario;
 
