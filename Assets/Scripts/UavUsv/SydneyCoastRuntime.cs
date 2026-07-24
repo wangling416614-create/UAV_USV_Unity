@@ -3,9 +3,19 @@ using UnityEngine;
 
 namespace UavUsv
 {
+    /// <summary>
+    /// Visual-only version of the former Unity coastline. It adds the familiar
+    /// scenery around the ROS world without adding collision or simulation
+    /// entities, so Gazebo remains authoritative.
+    /// </summary>
     public sealed class SydneyCoastRuntime : MonoBehaviour
     {
         private const float GazeboYawDegrees = 27.215f;
+        private const float OuterBoundaryScale = 2.15f;
+        // Sit the green rim on top of the expanded visual ocean so shore bands
+        // meet water instead of leaving horizon gaps.
+        private const float RimDistanceMeters = 560f;
+        private const float RimPieceScale = .00205f;
         private readonly List<Material> runtimeMaterials = new List<Material>();
         private readonly List<Mesh> runtimeMeshes = new List<Mesh>();
 
@@ -15,13 +25,42 @@ namespace UavUsv
         [Tooltip("Keep the outer Sydney scenery but cut out the center channel.")]
         public bool removeCenterChannel = true;
         public bool surroundWithOuterScenery = true;
+        [Tooltip("Keep trees and green terrain only; hide dock/building blocks.")]
+        public bool naturalEdgeScenery = true;
 
         public static SydneyCoastRuntime Create()
         {
-            var root = new GameObject("SydneyCoastline");
+            return CreateVisualBackdrop(Vector3.zero);
+        }
+
+        public static SydneyCoastRuntime CreateVisualBackdrop(
+            Vector3 worldPosition)
+        {
+            var root = new GameObject("visual_environment_backdrop");
             SydneyCoastRuntime coast = root.AddComponent<SydneyCoastRuntime>();
+            root.transform.position = worldPosition;
             coast.Build();
             return coast;
+        }
+
+        public void RebuildVisuals()
+        {
+            for (int i = transform.childCount - 1; i >= 0; i--)
+                Destroy(transform.GetChild(i).gameObject);
+            foreach (Material material in runtimeMaterials)
+            {
+                if (material)
+                    Destroy(material);
+            }
+            runtimeMaterials.Clear();
+            foreach (Mesh mesh in runtimeMeshes)
+            {
+                if (mesh)
+                    Destroy(mesh);
+            }
+            runtimeMeshes.Clear();
+            isReady = false;
+            Build();
         }
 
         private void Build()
@@ -29,22 +68,280 @@ namespace UavUsv
             GameObject visualPrefab = Resources.Load<GameObject>(
                 "SydneyCoast/sydney_regatta"
             );
-            GameObject collisionPrefab = Resources.Load<GameObject>(
-                "SydneyCoast/sydney_regatta_shore"
-            );
-            if (!visualPrefab || !collisionPrefab)
+            if (!visualPrefab)
             {
                 Debug.LogWarning("Sydney coastline resources are unavailable.");
                 return;
             }
 
-            transform.rotation = Quaternion.Euler(0f, -GazeboYawDegrees, 0f);
-
-            GameObject visualRoot = new GameObject("Sydney Coast Visual");
+            GameObject visualRoot = new GameObject(
+                naturalEdgeScenery ? "Green Coastal Rim" : "Sydney Coast Visual"
+            );
             visualRoot.transform.SetParent(transform, false);
-            GameObject collisionRootObject = new GameObject("Sydney Coast Collision");
-            collisionRootObject.transform.SetParent(transform, false);
-            collisionRoot = collisionRootObject.transform;
+            collisionRoot = null;
+
+            if (naturalEdgeScenery)
+                BuildNaturalGreenRim(visualRoot.transform, visualPrefab);
+            else
+                BuildLegacySurround(visualRoot.transform, visualPrefab);
+
+            isReady = visualRoot.GetComponentInChildren<Renderer>() != null;
+        }
+
+        private void BuildNaturalGreenRim(Transform visualRoot, GameObject visualPrefab)
+        {
+            // Eight coastal strips around the ocean, facing inward toward the fleet.
+            float[] headingsDeg = { 0f, 45f, 90f, 135f, 180f, 225f, 270f, 315f };
+            for (int i = 0; i < headingsDeg.Length; i++)
+            {
+                float heading = headingsDeg[i] * Mathf.Deg2Rad;
+                float east = Mathf.Sin(heading) * RimDistanceMeters;
+                float north = Mathf.Cos(heading) * RimDistanceMeters;
+                Vector3 worldPos = Coordinates.ToUnity(east, north, -1.05f);
+
+                GameObject visual = Instantiate(visualPrefab, visualRoot);
+                visual.name = "Green Rim " + headingsDeg[i].ToString("000");
+                visual.transform.position = worldPos;
+                // Face the operating area; keep a slight Sydney yaw for variety.
+                visual.transform.rotation = Quaternion.Euler(
+                    0f,
+                    headingsDeg[i] + 180f - GazeboYawDegrees,
+                    0f
+                );
+                visual.transform.localScale = Vector3.one * RimPieceScale;
+                ApplyLightweightMaterials(visual);
+                RemoveImportedComponents(visual);
+                CreateCoastalTransition(
+                    visualRoot,
+                    worldPos,
+                    headingsDeg[i],
+                    420f,
+                    150f
+                );
+            }
+        }
+
+        private void CreateCoastalTransition(
+            Transform parent,
+            Vector3 center,
+            float headingDeg,
+            float width,
+            float depth)
+        {
+            Material grass = CreateMutedGrassMaterial("Coastal greensward");
+            // Shore bands share hue with both the olive land and blue-grey water.
+            Material wetBank = CreateShoreFadeMaterial(
+                "Wet coastal bank",
+                new Color(.34f, .32f, .24f, .48f),
+                1.4f
+            );
+            Material shallows = CreateShoreFadeMaterial(
+                "Coastal shallows",
+                new Color(.16f, .22f, .22f, .30f),
+                1.75f
+            );
+            Material foam = CreateShoreFadeMaterial(
+                "Shore foam wash",
+                new Color(.56f, .58f, .56f, .14f),
+                2.2f
+            );
+            runtimeMaterials.Add(grass);
+            runtimeMaterials.Add(wetBank);
+            runtimeMaterials.Add(shallows);
+            runtimeMaterials.Add(foam);
+
+            float heading = headingDeg * Mathf.Deg2Rad;
+            Vector3 outward = Coordinates.ToUnity(
+                Mathf.Sin(heading),
+                Mathf.Cos(heading),
+                0f
+            );
+            Vector3 along = Coordinates.ToUnity(
+                Mathf.Cos(heading),
+                -Mathf.Sin(heading),
+                0f
+            );
+
+            // Pull transition bands slightly onto the water so the seam closes.
+            CreateIrregularShelf(
+                parent,
+                "Greensward " + headingDeg.ToString("000"),
+                center + outward * (depth * .18f) + Vector3.up * .04f,
+                along,
+                outward,
+                width,
+                depth * .70f,
+                .10f,
+                .22f,
+                grass,
+                false
+            );
+            CreateIrregularShelf(
+                parent,
+                "Wet Bank " + headingDeg.ToString("000"),
+                center + outward * (depth * -.12f) + Vector3.up * .03f,
+                along,
+                outward,
+                width * .98f,
+                depth * .32f,
+                .18f,
+                .30f,
+                wetBank,
+                true
+            );
+            CreateIrregularShelf(
+                parent,
+                "Shallows " + headingDeg.ToString("000"),
+                center + outward * (depth * -.34f) + Vector3.up * .02f,
+                along,
+                outward,
+                width * 1.02f,
+                depth * .40f,
+                .28f,
+                .38f,
+                shallows,
+                true
+            );
+            CreateIrregularShelf(
+                parent,
+                "Foam Wash " + headingDeg.ToString("000"),
+                center + outward * (depth * -.56f) + Vector3.up * .018f,
+                along,
+                outward,
+                width * 1.06f,
+                depth * .26f,
+                .35f,
+                .55f,
+                foam,
+                true
+            );
+        }
+
+        private void CreateIrregularShelf(
+            Transform parent,
+            string name,
+            Vector3 center,
+            Vector3 along,
+            Vector3 outward,
+            float width,
+            float depth,
+            float innerWave,
+            float outerWave,
+            Material material,
+            bool softEdge)
+        {
+            const int segments = 32;
+            var vertices = new Vector3[(segments + 1) * 2];
+            var uvs = new Vector2[vertices.Length];
+            var triangles = new int[segments * 6];
+
+            for (int i = 0; i <= segments; i++)
+            {
+                float t = (float)i / segments;
+                float lateral = (t - .5f) * width;
+                float coastNoise =
+                    Mathf.Sin(t * 17.3f + width * .01f) * .45f +
+                    Mathf.Sin(t * 31.7f + 1.7f) * .30f +
+                    Mathf.Sin(t * 53.1f + 4.2f) * .25f;
+                float endFade = Mathf.SmoothStep(0f, 1f, Mathf.Min(t, 1f - t) * 7f);
+                float inner = depth * .5f * (1f + coastNoise * innerWave) * (.70f + .30f * endFade);
+                float outer = -depth * .5f * (1f + coastNoise * outerWave) * (.70f + .30f * endFade);
+
+                vertices[i * 2] = center + along * lateral + outward * inner;
+                vertices[i * 2 + 1] = center + along * lateral + outward * outer;
+                uvs[i * 2] = new Vector2(t, 1f);
+                uvs[i * 2 + 1] = new Vector2(t, 0f);
+            }
+
+            int tri = 0;
+            for (int i = 0; i < segments; i++)
+            {
+                int a = i * 2;
+                triangles[tri++] = a;
+                triangles[tri++] = a + 1;
+                triangles[tri++] = a + 2;
+                triangles[tri++] = a + 1;
+                triangles[tri++] = a + 3;
+                triangles[tri++] = a + 2;
+            }
+
+            var mesh = new Mesh
+            {
+                name = name,
+                indexFormat = UnityEngine.Rendering.IndexFormat.UInt32
+            };
+            mesh.vertices = vertices;
+            mesh.uv = uvs;
+            mesh.triangles = triangles;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            runtimeMeshes.Add(mesh);
+
+            GameObject go = new GameObject(
+                name,
+                typeof(MeshFilter),
+                typeof(MeshRenderer)
+            );
+            go.transform.SetParent(parent, false);
+            go.GetComponent<MeshFilter>().sharedMesh = mesh;
+            MeshRenderer renderer = go.GetComponent<MeshRenderer>();
+            renderer.sharedMaterial = material;
+            renderer.shadowCastingMode =
+                UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = !softEdge;
+        }
+
+        private static Material CreateMutedGrassMaterial(string name)
+        {
+            Shader shader =
+                Resources.Load<Shader>("MutedCoastGrass") ??
+                Shader.Find("UavUsv/MutedCoastGrass");
+            if (!shader)
+            {
+                return SceneFactory.Material(
+                    name,
+                    new Color(.31f, .32f, .24f),
+                    0f,
+                    .06f
+                );
+            }
+
+            Material material = new Material(shader) { name = name };
+            if (material.HasProperty("_Color"))
+                material.SetColor("_Color", new Color(.30f, .32f, .24f, 1f));
+            if (material.HasProperty("_DryColor"))
+                material.SetColor("_DryColor", new Color(.38f, .35f, .26f, 1f));
+            if (material.HasProperty("_DarkColor"))
+                material.SetColor("_DarkColor", new Color(.20f, .22f, .17f, 1f));
+            if (material.HasProperty("_NoiseScale"))
+                material.SetFloat("_NoiseScale", .038f);
+            return material;
+        }
+
+        private static Material CreateShoreFadeMaterial(
+            string name,
+            Color color,
+            float fadePower)
+        {
+            Shader shader =
+                Resources.Load<Shader>("ShoreFade") ??
+                Shader.Find("UavUsv/ShoreFade");
+            if (!shader)
+                return SceneFactory.Material(name, color, 0f, .35f);
+
+            Material material = new Material(shader)
+            {
+                name = name,
+                color = color
+            };
+            if (material.HasProperty("_FadePower"))
+                material.SetFloat("_FadePower", fadePower);
+            return material;
+        }
+
+        private void BuildLegacySurround(Transform visualRoot, GameObject visualPrefab)
+        {
+            transform.rotation = Quaternion.Euler(0f, -GazeboYawDegrees, 0f);
 
             float[] rotations = surroundWithOuterScenery
                 ? new[] { 0f, 90f, 180f, 270f }
@@ -53,43 +350,17 @@ namespace UavUsv
             for (int i = 0; i < rotations.Length; i++)
             {
                 float yaw = rotations[i];
-                GameObject visual = Instantiate(visualPrefab, visualRoot.transform);
+                GameObject visual = Instantiate(visualPrefab, visualRoot);
                 visual.name = "Sydney Coast Visual " + yaw.ToString("000");
                 visual.transform.localPosition = Vector3.zero;
                 visual.transform.localRotation = Quaternion.Euler(0f, yaw, 0f);
-                // Unity applies the Collada node scale but not its centimeter unit.
-                visual.transform.localScale = Vector3.one * .0015f;
+                visual.transform.localScale =
+                    Vector3.one * (.0015f * OuterBoundaryScale);
                 if (removeCenterChannel)
                     ClipCenterChannelMeshes(visual);
                 ApplyLightweightMaterials(visual);
                 RemoveImportedComponents(visual);
-
-                GameObject collision = Instantiate(collisionPrefab, collisionRoot);
-                collision.name = "Sydney Coast Collision " + yaw.ToString("000");
-                collision.transform.localPosition = Vector3.zero;
-                // The collision DAE retains Z-up and omits its 0.001 scene scale.
-                collision.transform.localRotation = Quaternion.Euler(-90f, yaw, 0f);
-                collision.transform.localScale = Vector3.one * .00015f;
-                if (removeCenterChannel)
-                    ClipCenterChannelMeshes(collision);
             }
-
-            if (removeCenterChannel)
-                BuildShorelineBlend(visualRoot.transform);
-
-            foreach (Renderer renderer in collisionRoot.GetComponentsInChildren<Renderer>(true))
-                renderer.enabled = false;
-            foreach (MeshFilter filter in collisionRoot.GetComponentsInChildren<MeshFilter>(true))
-            {
-                if (!filter.sharedMesh)
-                    continue;
-                MeshCollider meshCollider = filter.gameObject.AddComponent<MeshCollider>();
-                meshCollider.sharedMesh = filter.sharedMesh;
-                meshCollider.convex = false;
-            }
-
-            Physics.SyncTransforms();
-            isReady = collisionRoot.GetComponentInChildren<MeshCollider>() != null;
         }
 
         private void BuildShorelineBlend(Transform parent)
@@ -276,17 +547,37 @@ namespace UavUsv
             {
                 string key = (renderer.gameObject.name + " " + renderer.name).ToLowerInvariant();
                 bool isTree = key.Contains("tree");
+                bool isTerrain = key.Contains("terrain") || key.Contains("ground") ||
+                                 key.Contains("grass") || key.Contains("land") ||
+                                 key.Contains("hill") || key.Contains("cliff") ||
+                                 key.Contains("rock") || key.Contains("soil");
+                bool isUrban =
+                    key.Contains("dock") || key.Contains("window") ||
+                    key.Contains("roof") || key.Contains("metal") ||
+                    key.Contains("wall") || key.Contains("building") ||
+                    key.Contains("house") || key.Contains("pier") ||
+                    key.Contains("crane") || key.Contains("boat") ||
+                    key.Contains("ship") || key.Contains("container");
+                if (naturalEdgeScenery && isUrban && !isTree && !isTerrain)
+                {
+                    // Hide docks/buildings; keep green fields + trees.
+                    renderer.enabled = false;
+                    continue;
+                }
+
                 Color color;
                 float smoothness;
                 if (isTree)
                 {
-                    color = new Color(.92f, .96f, .9f);
-                    smoothness = .05f;
+                    // Warm desaturated canopy so trees sit with olive ground + grey sea.
+                    color = new Color(.70f, .68f, .56f);
+                    smoothness = .04f;
                 }
-                else if (key.Contains("terrain"))
+                else if (isTerrain || (naturalEdgeScenery && !isUrban))
                 {
-                    color = new Color(.28f, .38f, .27f);
-                    smoothness = .08f;
+                    // Dusty olive / khaki ground, closer to Catalina rock warmth.
+                    color = new Color(.31f, .32f, .24f);
+                    smoothness = .06f;
                 }
                 else if (key.Contains("window"))
                 {
@@ -295,7 +586,7 @@ namespace UavUsv
                 }
                 else if (key.Contains("roof"))
                 {
-                    color = new Color(.46f, .2f, .12f);
+                    color = new Color(.36f, .18f, .12f);
                     smoothness = .25f;
                 }
                 else if (key.Contains("metal"))
@@ -315,7 +606,7 @@ namespace UavUsv
                 }
                 else
                 {
-                    color = new Color(.62f, .57f, .46f);
+                    color = new Color(.52f, .49f, .41f);
                     smoothness = .18f;
                 }
 
@@ -438,8 +729,10 @@ namespace UavUsv
         private static bool IsInRemovedCenterChannel(Vector3 world)
         {
             Vector3 enu = Coordinates.ToEnu(world);
-            return enu.x > -105f && enu.x < 112f &&
-                   enu.y > -145f && enu.y < 78f;
+            // Keep Catalina + fleet water clear; leave a green tree rim outside
+            // the 1050 x 900 m ocean so horizon/corners feel inhabited.
+            return enu.x > -470f && enu.x < 470f &&
+                   enu.y > -400f && enu.y < 390f;
         }
 
         private static void ConfigureTreeMaterial(

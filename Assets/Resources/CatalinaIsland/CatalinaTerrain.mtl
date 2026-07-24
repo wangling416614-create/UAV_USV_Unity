@@ -1,0 +1,8 @@
+newmtl CatalinaTerrainMaterial
+Ka 0.34 0.34 0.31
+Kd 0.78 0.76 0.68
+Ks 0.03 0.03 0.03
+Ns 8.0
+d 1.0
+illum 2
+map_Kd CatalinaLandCutout.png

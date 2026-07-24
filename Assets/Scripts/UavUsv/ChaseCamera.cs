@@ -130,11 +130,11 @@ namespace UavUsv
                         continue;
 
                     string objectName = subject.name;
-                    if (objectName.StartsWith("USV-"))
+                    if (IsUsvName(objectName))
                         boats.Add(subject);
-                    else if (objectName.StartsWith("UAV-"))
+                    else if (IsUavName(objectName))
                         drones.Add(subject);
-                    else if (objectName.Contains("Target"))
+                    else if (IsEnemyName(objectName))
                         focusTarget = subject;
                 }
             }
@@ -638,7 +638,7 @@ namespace UavUsv
                 subject,
                 new TrajectorySeries
                 {
-                    label = subject.name.Contains("Target") ? "TARGET" : subject.name,
+                    label = IsEnemyName(subject.name) ? "TARGET" : subject.name,
                     color = color
                 }
             );
@@ -717,17 +717,26 @@ namespace UavUsv
 
         private static Color FriendlyTrajectoryColor()
         {
-            return new Color(1f, .18f, .14f);
+            // USV trails on the tactical inset — orange.
+            return new Color(1f, .58f, .08f);
         }
 
         private static Color EnemyTrajectoryColor()
         {
-            return new Color(.12f, .46f, 1f);
+            // Target vessel trail remains red.
+            return new Color(1f, .18f, .14f);
         }
 
         private static Color AirTrajectoryColor()
         {
-            return new Color(1f, .78f, .12f);
+            // UAV trails on the tactical inset — cyan, distinct from USV orange.
+            return new Color(.2f, .88f, 1f);
+        }
+
+        private static Color MissionRangeColor()
+        {
+            // Capture and defense formation ranges are blue.
+            return new Color(.12f, .62f, 1f);
         }
 
         private void MoveCamera(Vector3 desiredPosition, Vector3 focusPoint)
@@ -807,8 +816,16 @@ namespace UavUsv
                 cameraHelpStyle
             );
 
-            if (showTacticalInset)
+            if (showTacticalInset && ShouldDrawTrajectoryInset())
                 DrawTrajectoryStatistics();
+        }
+
+        private bool ShouldDrawTrajectoryInset()
+        {
+            if (!captureScenario)
+                captureScenario = FindObjectOfType<MultiAgentCaptureDefenseScenario>();
+            // Follow scenario V toggle: hide trajectories with green sensor rings.
+            return !captureScenario || captureScenario.showDebugOverlays;
         }
 
         private void DrawTrajectoryStatistics()
@@ -959,7 +976,7 @@ namespace UavUsv
         )
         {
             Vector3 center = focusTarget.position;
-            Color ringColor = FriendlyTrajectoryColor();
+            Color ringColor = MissionRangeColor();
             ringColor.a = .82f;
             float readinessSum = 0f;
             int valid = 0;
@@ -1005,7 +1022,7 @@ namespace UavUsv
             Vector2 labelPoint = TrajectoryToGui(plot, worldMin, worldMax, labelWorld);
             DrawFormationLabel(
                 new Rect(labelPoint.x + 4f, labelPoint.y - 12f, 128f, 18f),
-                $"USV CIRCLE {progress * 100f:0}%",
+                $"围捕圈 {progress * 100f:0}%",
                 ringColor
             );
         }
@@ -1045,7 +1062,7 @@ namespace UavUsv
             if (progress <= .01f)
                 return;
 
-            Color triangleColor = AirTrajectoryColor();
+            Color triangleColor = MissionRangeColor();
             triangleColor.a = .88f;
             for (int i = 0; i < count; i++)
             {
@@ -1078,7 +1095,7 @@ namespace UavUsv
             Vector2 labelPoint = TrajectoryToGui(plot, worldMin, worldMax, labelWorld);
             DrawFormationLabel(
                 new Rect(labelPoint.x - 126f, labelPoint.y - 12f, 126f, 18f),
-                $"UAV TRIANGLE {progress * 100f:0}%",
+                $"护航环 {progress * 100f:0}%",
                 triangleColor
             );
         }
@@ -1223,7 +1240,7 @@ namespace UavUsv
             if (!subject)
                 return;
 
-            Vector3 worldHeading = subject.name.StartsWith("USV-")
+            Vector3 worldHeading = IsUsvName(subject.name)
                 ? subject.right
                 : subject.forward;
             Vector2 heading = new Vector2(worldHeading.x, -worldHeading.z);
@@ -1292,10 +1309,10 @@ namespace UavUsv
         {
             if (label == "TARGET")
                 return "T";
-            if (label.StartsWith("USV-"))
-                return "S" + label.Substring(4);
-            if (label.StartsWith("UAV-"))
-                return "A" + label.Substring(4);
+            if (IsUsvName(label))
+                return "S" + AgentNumber(label);
+            if (IsUavName(label))
+                return "A" + AgentNumber(label);
             return label;
         }
 
@@ -1367,8 +1384,9 @@ namespace UavUsv
                     continue;
 
                 string objectName = subject.name;
-                bool isUav = objectName.StartsWith("UAV-");
-                bool isTarget = objectName.Contains("Target");
+                bool isUav = IsUavName(objectName);
+                bool isTarget = IsEnemyName(objectName);
+                bool isFriendlyShip = objectName == "friendly_ship";
                 float labelHeight = isUav ? .8f : isTarget ? 4.2f : 3.1f;
                 Vector3 worldPoint = subject.position + Vector3.up * labelHeight;
                 Vector3 viewport = camera.WorldToViewportPoint(worldPoint);
@@ -1377,16 +1395,49 @@ namespace UavUsv
                     continue;
 
                 Vector3 screen = camera.WorldToScreenPoint(worldPoint);
-                string label = isTarget ? "TARGET" : objectName;
+                string rolePrefix = captureScenario && captureScenario.DefenseEscortActive
+                    ? "防卫 "
+                    : "我方 ";
+                string label = isTarget
+                    ? "敌方 " + objectName
+                    : isFriendlyShip
+                        ? "保护 " + objectName
+                    : rolePrefix + objectName;
                 GUIStyle style = isTarget
                     ? targetLabelStyle
                     : isUav ? uavLabelStyle : usvLabelStyle;
-                const float labelWidth = 82f;
-                const float labelHeightPixels = 24f;
+                const float labelWidth = 108f;
+                const float labelHeightPixels = 26f;
                 float x = screen.x - labelWidth * .5f;
                 float y = Screen.height - screen.y - labelHeightPixels * .5f;
                 GUI.Box(new Rect(x, y, labelWidth, labelHeightPixels), label, style);
             }
+        }
+
+        private static bool IsUsvName(string value)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   (value.StartsWith("USV-") || value.StartsWith("usv_"));
+        }
+
+        private static bool IsUavName(string value)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   (value.StartsWith("UAV-") || value.StartsWith("uav_"));
+        }
+
+        private static bool IsEnemyName(string value)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   (value.Contains("Target") || value == "enemy_ship");
+        }
+
+        private static string AgentNumber(string value)
+        {
+            int separator = value.LastIndexOfAny(new[] { '-', '_' });
+            return separator >= 0 && separator + 1 < value.Length
+                ? value.Substring(separator + 1)
+                : value;
         }
 
         private void EnsureGuiStyles()
@@ -1394,9 +1445,10 @@ namespace UavUsv
             if (usvLabelStyle != null)
                 return;
 
-            usvLabelStyle = CreateLabelStyle(new Color(1f, .72f, .18f));
-            uavLabelStyle = CreateLabelStyle(new Color(.18f, .9f, 1f));
-            targetLabelStyle = CreateLabelStyle(new Color(1f, .25f, .18f));
+            // 3D nameplates: friendly / hostile tags (trajectory colors stay unchanged).
+            usvLabelStyle = CreateLabelStyle(new Color(1f, .82f, .35f));
+            uavLabelStyle = CreateLabelStyle(new Color(.45f, .88f, 1f));
+            targetLabelStyle = CreateLabelStyle(new Color(.92f, .92f, .95f));
             cameraHelpStyle = new GUIStyle(GUI.skin.box)
             {
                 alignment = TextAnchor.MiddleCenter,

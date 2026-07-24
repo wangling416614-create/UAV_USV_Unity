@@ -6,7 +6,8 @@ namespace UavUsv
     public sealed class OceanSurface : MonoBehaviour
     {
         public int resolution = 180;
-        public float size = 180f;
+        [Min(1f)] public float width = 1050f;
+        [Min(1f)] public float length = 900f;
         [Range(0f, .45f)] public float edgeIrregularity = .16f;
         [Range(0f, 20f)] public float windSpeed = 7f;
         [Range(0f, 360f)] public float windDirectionDegrees = 28f;
@@ -27,7 +28,10 @@ namespace UavUsv
                 int i = z * n + x;
                 float u = (float)x / resolution;
                 float v = (float)z / resolution;
-                Vector2 p = new Vector2(u - .5f, v - .5f) * size;
+                Vector2 p = new Vector2(
+                    (u - .5f) * width,
+                    (v - .5f) * length
+                );
                 p = WarpEdge(p);
                 vertices[i] = new Vector3(p.x, 0, p.y);
                 uv[i] = new Vector2(u, v);
@@ -66,9 +70,11 @@ namespace UavUsv
             oceanMaterial.SetVector("_WindDirection", new Vector4(Mathf.Cos(radians), 0, Mathf.Sin(radians), 0));
             oceanMaterial.SetFloat("_WindSpeed", windSpeed);
             oceanMaterial.SetFloat("_WaveAmplitude", waveAmplitude);
-            oceanMaterial.SetColor("_DeepColor", new Color(.035f, .17f, .22f, 1f));
-            oceanMaterial.SetColor("_ShallowColor", new Color(.075f, .31f, .37f, 1f));
-            oceanMaterial.SetColor("_FoamColor", new Color(.72f, .86f, .88f, 1f));
+            // Temperate coastal palette: blue-grey water, not tropical teal.
+            oceanMaterial.SetColor("_DeepColor", new Color(.05f, .12f, .16f, 1f));
+            oceanMaterial.SetColor("_ShallowColor", new Color(.13f, .21f, .23f, 1f));
+            oceanMaterial.SetColor("_FoamColor", new Color(.62f, .66f, .64f, 1f));
+            oceanMaterial.SetFloat("_Smoothness", .86f);
         }
 
         private void OnDestroy()
@@ -81,11 +87,12 @@ namespace UavUsv
             if (edgeIrregularity <= 0f)
                 return point;
 
-            float half = size * .5f;
-            float edgeBand = size * .22f;
+            float halfX = width * .5f;
+            float halfY = length * .5f;
+            float edgeBand = Mathf.Min(width, length) * .22f;
             float distanceToEdge = Mathf.Min(
-                Mathf.Min(point.x + half, half - point.x),
-                Mathf.Min(point.y + half, half - point.y)
+                Mathf.Min(point.x + halfX, halfX - point.x),
+                Mathf.Min(point.y + halfY, halfY - point.y)
             );
             float edgeWeight = 1f - Mathf.Clamp01(distanceToEdge / edgeBand);
             if (edgeWeight <= 0f)
@@ -99,7 +106,9 @@ namespace UavUsv
                 Mathf.Sin(angle * 5.0f + .35f) * .46f +
                 Mathf.Sin(angle * 9.0f + 1.8f) * .31f +
                 Mathf.Sin(angle * 15.0f - .7f) * .18f;
-            float offset = wave * size * edgeIrregularity * .42f * edgeWeight;
+            float offset =
+                wave * Mathf.Min(width, length) *
+                edgeIrregularity * .42f * edgeWeight;
             return point + fromCenter * offset;
         }
     }

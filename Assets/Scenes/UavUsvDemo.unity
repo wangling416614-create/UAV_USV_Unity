@@ -151,13 +151,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: faec3bd73b506a746b9b0bb2f0147e5b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  useExternalPoseInEditor: 0
+  useExternalPoseInEditor: 1
   useWebSocketPose: 1
   webSocketUrl: ws://127.0.0.1:8765/uav_usv
-  platformUrl: http://127.0.0.1:8081/api/integration/heartbeat
-  platformToken: uav-usv-local-agent
-  playMissionInEditor: 0
-  runLocalMultiAgentScenarioInEditor: 1
 --- !u!4 &721058968
 Transform:
   m_ObjectHideFlags: 0

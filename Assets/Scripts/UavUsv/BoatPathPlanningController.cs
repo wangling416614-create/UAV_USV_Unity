@@ -308,7 +308,11 @@ namespace UavUsv
                 status = "Select a point on the water";
             }
 
-            GUI.enabled = plannedPath.Count >= 2 && webSocket && webSocket.isConnected;
+            GUI.enabled =
+                plannedPath.Count >= 2 &&
+                webSocket &&
+                webSocket.isConnected &&
+                webSocket.acceptsCommands;
             if (GUI.Button(new Rect(panelRect.x + 121f, buttonY, 98f, 32f), "Execute"))
                 ExecutePath();
             GUI.enabled = true;
